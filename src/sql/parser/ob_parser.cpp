@@ -19,14 +19,19 @@
 #include "ob_sql_parser.h"
 #include "pl/parser/ob_pl_parser.h"
 #include "lib/utility/ob_tracepoint.h"
+#include "lib/json/ob_json_print_utils.h"
 using namespace oceanbase::pl;
 using namespace oceanbase::sql;
 using namespace oceanbase::common;
 
-ObParser::ObParser(common::ObIAllocator &allocator, ObSQLMode mode, ObCollationType conn_collation)
+ObParser::ObParser(common::ObIAllocator &allocator,
+                   ObSQLMode mode,
+                   ObCollationType conn_collation,
+                   QuestionMarkDefNameCtx *ctx)
     :allocator_(&allocator),
      sql_mode_(mode),
-     connection_collation_(conn_collation)
+     connection_collation_(conn_collation),
+     def_name_ctx_(ctx)
 {}
 
 ObParser::~ObParser()
@@ -369,6 +374,8 @@ ObParser::State ObParser::transform_normal(ObString &normal)
   ELSIF(2, S_OF, "of")
   ELSIF(11, S_EDITIONABLE, "editionable")
   ELSIF(14, S_EDITIONABLE, "noneditionable")
+  ELSIF(6, S_SIGNAL, "signal")
+  ELSIF(8, S_RESIGNAL, "resignal")
   ELSE()
 
   if (S_INVALID == state
@@ -400,7 +407,9 @@ ObParser::State ObParser::transform_normal(
         case S_FUNCTION:
         case S_PACKAGE:
         case S_TRIGGER:
-        case S_TYPE: {
+        case S_TYPE:
+        case S_SIGNAL:
+        case S_RESIGNAL: {
           is_pl = true;
         } break;
         case S_CALL: {
@@ -484,7 +493,7 @@ ObParser::State ObParser::transform_normal(
     } break;
     default: {
       is_not_pl = true;
-      LOG_WARN("unexpecte state", K(state));
+      LOG_WARN_RET(common::OB_ERR_UNEXPECTED, "unexpecte state", K(state));
     } break;
   }
   return state;
@@ -978,6 +987,7 @@ int ObParser::parse(const ObString &query,
   parse_result.is_for_trigger_ = (TRIGGER_MODE == parse_mode);
   parse_result.is_dynamic_sql_ = (DYNAMIC_SQL_MODE == parse_mode);
   parse_result.is_dbms_sql_ = (DBMS_SQL_MODE == parse_mode);
+  parse_result.is_for_udr_ = (UDR_SQL_MODE == parse_mode);
   parse_result.is_batched_multi_enabled_split_ = is_batched_multi_stmt_split_on;
   parse_result.is_not_utf8_connection_ = ObCharset::is_valid_collation(connection_collation_) ?
         (ObCharset::charset_type_by_coll(connection_collation_) != CHARSET_UTF8MB4) : false;
@@ -995,6 +1005,11 @@ int ObParser::parse(const ObString &query,
   parse_result.connection_collation_ = connection_collation_;
   parse_result.mysql_compatible_comment_ = false;
   parse_result.enable_compatible_comment_ = true;
+  if (nullptr != def_name_ctx_) {
+    parse_result.question_mark_ctx_.by_defined_name_ = true;
+    parse_result.question_mark_ctx_.name_ = def_name_ctx_->name_;
+    parse_result.question_mark_ctx_.count_ = def_name_ctx_->count_;
+  }
 
   if (INS_MULTI_VALUES == parse_mode) {
     void *buffer = nullptr;

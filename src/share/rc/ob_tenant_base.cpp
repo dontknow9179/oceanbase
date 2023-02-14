@@ -44,7 +44,9 @@ ObTenantBase::ObTenantBase(const uint64_t id, bool enable_tenant_ctx_check)
     tenant_role_value_(share::ObTenantRole::Role::PRIMARY_TENANT),
     cgroups_(nullptr),
     enable_tenant_ctx_check_(enable_tenant_ctx_check),
-    thread_count_(0)
+    thread_count_(0),
+    memory_size_(0),
+    mini_mode_(false)
 {
 }
 #undef CONSTRUCT_MEMBER
@@ -182,7 +184,7 @@ void ObTenantBase::stop_mtl_module()
       int64_t start_time_us = ObTimeUtility::current_time();                    \
       this->stop_m##IDX##_func(this->m##IDX##_);                                \
       int64_t cost_time_us = ObTimeUtility::current_time() - start_time_us;     \
-      LOG_INFO("finish stop mtl"#IDX, K(cost_time_us));                         \
+      FLOG_INFO("finish stop mtl"#IDX, K(cost_time_us));                         \
     };                                                                          \
     func_arr.push_back(fw);                                                     \
   }
@@ -205,7 +207,7 @@ void ObTenantBase::wait_mtl_module()
       int64_t start_time_us = ObTimeUtility::current_time();                    \
       this->wait_m##IDX##_func(this->m##IDX##_);                                \
       int64_t cost_time_us = ObTimeUtility::current_time() - start_time_us;     \
-      LOG_INFO("finish wait mtl"#IDX, K(cost_time_us));                         \
+      FLOG_INFO("finish wait mtl"#IDX, K(cost_time_us));                         \
     };                                                                          \
     func_arr.push_back(fw);                                                     \
   }
@@ -221,7 +223,7 @@ void ObTenantBase::destroy()
 {
   destroy_mtl_module();
   if (tg_set_.size() > 0) {
-    LOG_ERROR("tg thread not execute tg_destory make tg_id leak", K(tg_set_.size()), K(tg_set_));
+    LOG_ERROR_RET(OB_ERR_UNEXPECTED, "tg thread not execute tg_destory make tg_id leak", K(tg_set_.size()), K(tg_set_));
   }
   tg_set_.destroy();
   thread_dynamic_factor_map_.destroy();
@@ -239,7 +241,7 @@ void ObTenantBase::destroy_mtl_module()
       int64_t start_time_us = ObTimeUtility::current_time();                    \
       this->destroy_m##IDX##_func(this->m##IDX##_);                             \
       int64_t cost_time_us = ObTimeUtility::current_time() - start_time_us;     \
-      LOG_INFO("finish destroy mtl"#IDX, K(cost_time_us));                      \
+      FLOG_INFO("finish destroy mtl"#IDX, K(cost_time_us));                      \
     };                                                                          \
     func_arr.push_back(fw);                                                     \
   }
@@ -352,6 +354,18 @@ int ObTenantBase::unregister_module_thread_dynamic(ThreadDynamicImpl *dynamic_im
   return thread_dynamic_factor_map_.erase_refactored(dynamic_impl);
 }
 
+int64_t ObTenantBase::get_max_session_num(const int64_t rl_max_session_num)
+{
+  int64_t max_session_num = 0;
+  if (rl_max_session_num != 0) {
+    max_session_num = rl_max_session_num;
+  } else {
+    /* As test, one session occupies 100K bytes*/
+    max_session_num = max(100, (memory_size_ * 5 / 100) / (100<<10));
+  }
+  return max_session_num;
+}
+
 int ObTenantBase::update_thread_cnt(double tenant_unit_cpu)
 {
   int64_t old_thread_count = ATOMIC_LOAD(&thread_count_);
@@ -387,7 +401,7 @@ int ObTenantBase::update_thread_cnt(double tenant_unit_cpu)
 void ObTenantEnv::set_tenant(ObTenantBase *ctx)
 {
   if (ctx != nullptr && ctx->id_ == OB_INVALID_TENANT_ID) {
-    LOG_ERROR("ObTenantEnv::set_tenant", KP(ctx));
+    LOG_ERROR_RET(OB_ERROR, "ObTenantEnv::set_tenant", KP(ctx));
     ob_abort();
   }
   get_tenant() = ctx;
@@ -427,6 +441,7 @@ int ObTenantSwitchGuard::switch_to(ObTenantBase *ctx)
     on_switch_ = true;
     stash_tenant_ = ObTenantEnv::get_tenant();
     ObTenantEnv::set_tenant(ctx);
+    ta_guard_.switch_to(ctx->id());
   } else {
     on_switch_ = false;
     stash_tenant_ = nullptr;
@@ -487,6 +502,9 @@ int ObTenantSwitchGuard::switch_to(uint64_t tenant_id, bool need_check_allow)
       ret = OB_TENANT_NOT_IN_SERVER;
     }
     LOG_WARN("switch tenant fail", K(tenant_id), K(ret), K(lbt()));
+  }
+  if (OB_SUCC(ret)) {
+    ta_guard_.switch_to(tenant_id);
   }
   return ret;
 }

@@ -23,10 +23,6 @@
 #include "share/stat/ob_stat_define.h"
 
 namespace oceanbase {
-namespace sql
-{
-class ObPlanCacheManager;
-}
 namespace common {
 class ObOptColumnStatHandle;
 
@@ -36,8 +32,7 @@ public:
   ObOptStatManager();
   virtual ~ObOptStatManager() {}
   virtual int init(ObMySQLProxy *proxy,
-                   ObServerConfig *config,
-                   sql::ObPlanCacheManager *pc_mgr);
+                   ObServerConfig *config);
 
   static int64_t get_default_data_size();
 
@@ -104,7 +99,8 @@ public:
                      int64_t *avg_len = NULL,
                      int64_t *avg_part_size = NULL,
                      int64_t *macro_block_count = NULL,
-                     int64_t *micro_block_count = NULL);
+                     int64_t *micro_block_count = NULL,
+                     int64_t *last_analyzed = NULL);
 
   int get_table_stat(const uint64_t tenant_id,
                      const uint64_t tab_ref_id,
@@ -113,7 +109,8 @@ public:
                      int64_t *row_count = NULL,
                      int64_t *avg_len = NULL,
                      int64_t *avg_part_size = NULL,
-                     int64_t *micro_block_count = NULL);
+                     int64_t *micro_block_count = NULL,
+                     int64_t *last_analyzed = NULL);
 
   int get_table_stat(const uint64_t tenant_id,
                      const uint64_t table_id,
@@ -139,6 +136,10 @@ public:
                                  bool only_update_col_stat = false);
 
   int delete_table_stat(const uint64_t tenant_id,
+                        const uint64_t ref_id,
+                        int64_t &affected_rows);
+
+  int delete_table_stat(uint64_t tenant_id,
                         const uint64_t ref_id,
                         const ObIArray<int64_t> &part_ids,
                         const bool cascade_column,
@@ -178,6 +179,7 @@ public:
   int invalidate_plan(const uint64_t tenant_id, const uint64_t table_id);
 
   int handle_refresh_stat_task(const obrpc::ObUpdateStatCacheArg &arg);
+
   static ObOptStatManager &get_instance()
   {
     static ObOptStatManager instance_;
@@ -189,7 +191,6 @@ protected:
   bool inited_;
   common::ObDedupQueue refresh_stat_task_queue_;
   ObOptStatService stat_service_;
-  sql::ObPlanCacheManager *pc_mgr_;
   int64_t last_schema_version_;
 };
 

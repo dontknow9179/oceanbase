@@ -245,15 +245,16 @@ public:
   friend class Handle;
 public:
   DCHash(IArrayAlloc& alloc, int64_t min_size, int64_t max_size):
-      alloc_(alloc), root_(0), tail_(UINT64_MAX), cur_array_(NULL),
+      lock_(common::ObLatchIds::HASH_MAP_LOCK), alloc_(alloc), root_(0),
+      tail_(UINT64_MAX), cur_array_(NULL),
       min_size_(min_size), max_size_(max_size), target_size_(min_size)
   {
     if (OB_UNLIKELY(min_size_ < BATCH_SIZE)) {
-      _OB_LOG(ERROR, "min_size(%ld) is smaller than BATCH_SIZE(%u)", min_size_, BATCH_SIZE);
+      _OB_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "min_size(%ld) is smaller than BATCH_SIZE(%u)", min_size_, BATCH_SIZE);
       min_size_ = BATCH_SIZE;
     }
     if (OB_UNLIKELY(min_size_ > max_size_)) {
-      OB_LOG(ERROR, "bad min/max size", K(min_size_), K(max_size_));
+      OB_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "bad min/max size", K(min_size_), K(max_size_));
     }
   }
   ~DCHash() { destroy(); }

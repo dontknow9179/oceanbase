@@ -147,7 +147,7 @@ int ObTxLoopWorker::scan_all_ls_(bool can_tx_gc, bool can_gc_retain_ctx)
     cur_ls_ptr = nullptr;
     while (OB_SUCCESS == (iter_ret = iter_ptr->get_next(cur_ls_ptr))) {
 
-      int64_t min_start_scn = OB_INVALID_TIMESTAMP;
+      SCN min_start_scn;
       MinStartScnStatus status = MinStartScnStatus::UNKOWN;
       common::ObRole role;
       int64_t base_proposal_id, proposal_id;
@@ -178,9 +178,9 @@ int ObTxLoopWorker::scan_all_ls_(bool can_tx_gc, bool can_gc_retain_ctx)
       }
 
       if (MinStartScnStatus::UNKOWN == status) {
-        min_start_scn = OB_INVALID_TIMESTAMP;
+        min_start_scn.reset();
       } else if (MinStartScnStatus::NO_CTX == status) {
-        min_start_scn = 0;
+        min_start_scn.set_min();
       }
 
       // keep alive, interval = 100ms
@@ -201,7 +201,7 @@ int ObTxLoopWorker::scan_all_ls_(bool can_tx_gc, bool can_gc_retain_ctx)
   return ret;
 }
 
-void ObTxLoopWorker::do_keep_alive_(ObLS *ls_ptr, int64_t min_start_scn, MinStartScnStatus status)
+void ObTxLoopWorker::do_keep_alive_(ObLS *ls_ptr, const SCN &min_start_scn, MinStartScnStatus status)
 {
   int ret = OB_SUCCESS;
 
@@ -216,7 +216,7 @@ void ObTxLoopWorker::do_keep_alive_(ObLS *ls_ptr, int64_t min_start_scn, MinStar
   UNUSED(ret);
 }
 
-void ObTxLoopWorker::do_tx_gc_(ObLS *ls_ptr, int64_t &min_start_scn, MinStartScnStatus &status)
+void ObTxLoopWorker::do_tx_gc_(ObLS *ls_ptr, SCN &min_start_scn, MinStartScnStatus &status)
 {
   int ret = OB_SUCCESS;
 
@@ -232,7 +232,7 @@ void ObTxLoopWorker::do_tx_gc_(ObLS *ls_ptr, int64_t &min_start_scn, MinStartScn
 void ObTxLoopWorker::update_max_commit_ts_(ObLS *ls_ptr)
 {
   int ret = OB_SUCCESS;
-  int64_t snapshot = 0;
+  SCN snapshot;
   const int64_t expire_ts = ObClockGenerator::getClock() + 1000000; // 1s
 
   do {
@@ -245,7 +245,7 @@ void ObTxLoopWorker::update_max_commit_ts_(ObLS *ls_ptr)
       } else {
         TRANS_LOG(WARN, "get gts fail", "tenant_id", MTL_ID());
       }
-    } else if (OB_UNLIKELY(snapshot <= 0)) {
+    } else if (OB_UNLIKELY(!snapshot.is_valid())) {
       ret = OB_ERR_UNEXPECTED;
       TRANS_LOG(WARN, "invalid snapshot from gts", K(snapshot));
     } else {

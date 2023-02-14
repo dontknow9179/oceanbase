@@ -340,9 +340,6 @@ int ObDfoMgr::init(ObExecContext &exec_ctx,
     LOG_WARN("fail assign worker to dfos",
              K(admited_worker_count), K(expected_worker_count), K(ret));
   } else {
-    if (1 == edges_.count() && OB_NOT_NULL(rpc_dfo = edges_.at(0))) {
-      rpc_dfo->set_rpc_worker(1 == rpc_dfo->get_dop());
-    }
     inited_ = true;
   }
   return ret;
@@ -373,6 +370,7 @@ int ObDfoMgr::do_split(ObExecContext &exec_ctx,
     LOG_WARN("the first phy_op must be a coord op", K(ret));
   } else if (phy_op->is_table_scan() && NULL != parent_dfo) {
     parent_dfo->set_scan(true);
+    parent_dfo->inc_tsc_op_cnt();
   } else if (phy_op->is_dml_operator() && NULL != parent_dfo) {
     // 当前op是一个dml算子，需要设置dfo的属性
     parent_dfo->set_dml_op(true);

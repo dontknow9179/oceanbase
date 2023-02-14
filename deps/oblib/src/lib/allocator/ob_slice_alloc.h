@@ -43,7 +43,7 @@ class ObDListWithLock
 {
 public:
   typedef ObDLink DLink;
-  ObDListWithLock(): lock_() {
+  ObDListWithLock(): lock_(ObLatchIds::OB_DLIST_LOCK) {
     head_.next_ = &head_;
     head_.prev_ = &head_;
   }
@@ -105,6 +105,17 @@ public:
     }
     return p;
   }
+  bool is_in_queue(void *item) {
+    bool is_in_queue = false;
+    for (uint64_t i = pop_; i < push_; i++) {
+      void *p = data_[i % capacity_];
+      if (p == item) {
+        is_in_queue = true;
+        break;
+      }
+    }
+    return is_in_queue;
+  }
 private:
   uint64_t push_ CACHE_ALIGNED;
   uint64_t pop_ CACHE_ALIGNED;
@@ -135,7 +146,7 @@ public:
   int32_t remain() { return stock_ > K ? stock_ - K : (stock_ < 0 ? stock_ + K : stock_); }
   bool acquire() { return dec_if_gt(K, K) > K; }
   bool release() { return faa(-K) > 0; }
-  bool recycle() { 
+  bool recycle() {
     int32_t total = total_;
     return inc_if_lt(2 * K, -K + total) == -K + total; 
   }
@@ -191,7 +202,7 @@ public:
   struct Item
   {
   public:
-    Item(Host* host): MAGIC_CODE_(ITEM_MAGIC_CODE), host_(host) {}
+    Item(Host *host): MAGIC_CODE_(ITEM_MAGIC_CODE), host_(host) {}
     ~Item(){}
     uint32_t MAGIC_CODE_;
     ObBlockSlicer* host_;
@@ -239,6 +250,7 @@ public:
   }
   void* get_tmallocator() { return tmallocator_; }
   void* get_slice_alloc() { return slice_alloc_; }
+  void print_leak_slice();
 private:
   ObSliceAlloc* slice_alloc_;
   void* tmallocator_;
@@ -280,33 +292,7 @@ public:
     new(this)ObSliceAlloc(size, attr, block_size, block_alloc, NULL);
     return ret;
   }
-  void destroy() {
-    for(int i = MAX_ARENA_NUM - 1; i >= 0; i--) {
-      Arena& arena = arena_[i];
-      Block* old_blk = arena.clear();
-      if (NULL != old_blk) {
-        blk_ref_[ObBlockSlicer::hash((uint64_t)old_blk) % MAX_REF_NUM].sync();
-        if (old_blk->release()) {
-          blk_list_.add(&old_blk->dlink_);
-        }
-      }
-    }
-    ObDLink* dlink = nullptr;
-    dlink = blk_list_.top();
-    while (OB_NOT_NULL(dlink)) {
-      Block* blk = CONTAINER_OF(dlink, Block, dlink_);
-      if (blk->recycle()) {
-        destroy_block(blk);
-        dlink = blk_list_.top();
-      } else {
-        _LIB_LOG(ERROR, "there was memory leak, stock=%d, total=%d, remain=%d"
-            , blk->stock(), blk->total(), blk->remain());
-        dlink = nullptr; // break
-      }
-    }
-    tmallocator_ = NULL;
-    bsize_ = 0;
-  }
+  void destroy();
   void set_nway(int nway) {
     if (nway <= 0) {
       nway = 1;
@@ -333,7 +319,7 @@ public:
       // slice_size is larger than block_size
       tmp_ret = OB_ERR_UNEXPECTED;
       if (REACH_TIME_INTERVAL(100 * 1000)) {
-        LIB_LOG(ERROR, "slice size is larger than block size, unexpected !", K(tmp_ret), K(isize_), K(slice_limit_));
+        LIB_LOG_RET(ERROR, tmp_ret, "slice size is larger than block size, unexpected !", K(tmp_ret), K(isize_), K(slice_limit_));
       }
     }
     while(NULL == ret && OB_SUCCESS == tmp_ret) {
@@ -367,6 +353,7 @@ public:
         }
       }
     }
+
     return NULL == ret? NULL: (void*)(ret + 1);
 #endif
   }
@@ -383,7 +370,7 @@ public:
       abort_unless(bsize_ != 0);
 #else
       if (this != blk->get_slice_alloc()) {
-        LIB_LOG(ERROR, "blk is freed or alloced by different slice_alloc", K(this), K(blk->get_slice_alloc()));
+        LIB_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "blk is freed or alloced by different slice_alloc", K(this), K(blk->get_slice_alloc()));
         return;
       }
 #endif
@@ -413,6 +400,9 @@ public:
     return snprintf(buf, limit, "SliceAlloc: nway=%d bsize/isize=%d/%d limit=%d attr=%s",
                     nway_, bsize_, isize_, slice_limit_, to_cstring(attr_));
   }
+  int32_t get_bsize() { return bsize_; }
+  int32_t get_isize() { return isize_; }
+
 private:
   void release_block(Block* blk) {
     if (blk->release()) {

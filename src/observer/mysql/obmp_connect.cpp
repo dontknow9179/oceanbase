@@ -87,6 +87,7 @@ int ObMPConnect::deserialize()
     } else {
       conn->cap_flags_ = hsr_.get_capability_flags();
       conn->client_cs_type_ = hsr_.get_char_set();
+      conn->sql_req_level_ = hsr_.get_sql_request_level();
 
       if (hsr_.is_obproxy_client_mode()) {
         conn->is_proxy_ = true;
@@ -120,7 +121,6 @@ int ObMPConnect::init_process_single_stmt(const ObMultiStmtItem &multi_stmt_item
 {
   int ret = OB_SUCCESS;
   const ObString &sql = multi_stmt_item.get_sql();
-  bool use_session_trace = false;
   ObVirtualTableIteratorFactory vt_iter_factory(*gctx_.vt_iter_creator_);
   ObSessionStatEstGuard stat_est_guard(get_conn()->tenant_->id(), session.get_sessid());
   ObSchemaGetterGuard schema_guard;
@@ -128,7 +128,7 @@ int ObMPConnect::init_process_single_stmt(const ObMultiStmtItem &multi_stmt_item
   observer::ObReqTimeGuard req_timeinfo_guard;
   ObSqlCtx ctx;
   ctx.exec_type_ = MpQuery;
-  if (OB_FAIL(init_process_var(ctx, multi_stmt_item, session, use_session_trace))) {
+  if (OB_FAIL(init_process_var(ctx, multi_stmt_item, session))) {
     LOG_WARN("init process var failed.", K(ret), K(multi_stmt_item));
   } else if (OB_FAIL(gctx_.schema_service_->get_tenant_schema_guard(
                                   session.get_effective_tenant_id(), schema_guard))) {
@@ -171,7 +171,7 @@ int ObMPConnect::init_process_single_stmt(const ObMultiStmtItem &multi_stmt_item
 
     //对于tracelog的处理，不影响正常逻辑，错误码无须赋值给ret
     int tmp_ret = OB_SUCCESS;
-    tmp_ret = do_after_process(session, use_session_trace, ctx, false); // 不是异步回包
+    tmp_ret = do_after_process(session, ctx, false); // 不是异步回包
     UNUSED(tmp_ret);
   }
   return ret;
@@ -258,17 +258,22 @@ int ObMPConnect::process()
       LOG_WARN("update_proxy_sys_vars failed", K(ret));
     } else if (OB_FAIL(update_charset_sys_vars(*conn, *session))) {
       LOG_WARN("fail to update charset sys vars", K(ret));
-    } else if (OB_FAIL(setup_user_resource_group(*conn, tenant_id, session->get_user_id()))) {
+    } else if (OB_FAIL(setup_user_resource_group(*conn, tenant_id, session))) {
       LOG_WARN("fail setup user resource group", K(ret));
     } else {
       // set connection info to session
       session->set_ob20_protocol(conn->proxy_cap_flags_.is_ob_protocol_v2_support());
+      // set sql request level to session, to avoid sql request dead lock between OB cluster (eg. dblink)
+      session->set_sql_request_level(conn->sql_req_level_);
+      // set session var sync info.
+      session->set_session_var_sync(conn->proxy_cap_flags_.is_session_var_sync_support());
 
       LOG_TRACE("setup user resource group OK",
                "user_id", session->get_user_id(),
                K(tenant_id),
                K(user_name_),
-               "group_id", conn->group_id_);
+               "group_id", conn->group_id_,
+               "sql_req_level", conn->sql_req_level_);
       conn->set_auth_phase();
     }
 
@@ -302,7 +307,6 @@ int ObMPConnect::process()
       ObOKPParam ok_param;
       ok_param.is_on_connect_ = true;
       ok_param.affected_rows_ = 0;
-      SQL_REQ_OP.set_sql_session_to_sock_desc(req_, (void *)session);
       if (OB_FAIL(send_ok_packet(*session, ok_param))) {
         LOG_WARN("fail to send ok packet", K(ok_param), K(ret));
       }
@@ -334,7 +338,7 @@ int ObMPConnect::process()
     }
 
     if (NULL != session) {
-      // oracle temp table need to be refactored 
+      // oracle temp table need to be refactored
       //if (OB_SUCCESS == proc_ret) {
       //  proc_ret = session->drop_reused_oracle_temp_tables();
       //}
@@ -412,6 +416,7 @@ int ObMPConnect::load_privilege_info(ObSQLSessionInfo &session)
     }
 
     ObString host_name;
+    uint64_t client_attr_cap_flags = 0;
     if (OB_DIAG_TENANT_ID == conn->tenant_id_) {
       const ObString scramble_str(conn->scramble_buf_);
       if (OB_FAIL(GCTX.diag_->check_passwd(hsr_.get_auth_response(), scramble_str))) {
@@ -448,8 +453,11 @@ int ObMPConnect::load_privilege_info(ObSQLSessionInfo &session)
                                                         session.get_database_name(),
                                                         db_id))) {
           LOG_WARN("failed to get database id", K(ret));
+        } else if (OB_FAIL(get_client_attribute_capability(client_attr_cap_flags))) {
+          LOG_WARN("failed to get client attribute capability", K(ret));
         } else {
           session.set_database_id(db_id);
+          session.set_client_attrbuite_capability(client_attr_cap_flags);
         }
       }
     } else {
@@ -661,6 +669,10 @@ int ObMPConnect::load_privilege_info(ObSQLSessionInfo &session)
           LOG_WARN("failed to update database variables", K(ret));
         } else if (OB_FAIL(session.update_max_packet_size())) {
           LOG_WARN("failed to update max packet size", K(ret));
+        } else if (OB_FAIL(get_client_attribute_capability(client_attr_cap_flags))) {
+          LOG_WARN("failed to get client attribute capability", K(ret));
+        } else {
+          session.set_client_attrbuite_capability(client_attr_cap_flags);
         }
 
         if (OB_SUCC(ret) && !session.get_database_name().empty()) {
@@ -703,7 +715,8 @@ int ObMPConnect::load_privilege_info(ObSQLSessionInfo &session)
     LOG_DEBUG("obmp connect info:", K_(tenant_name), K_(user_name),
               K(host_name), K_(client_ip), "database", hsr_.get_database(),
               K(hsr_.get_capability_flags().capability_),
-              K(session.is_client_use_lob_locator()));
+              K(session.is_client_use_lob_locator()),
+              K(session.is_client_support_lob_locatorv2()));
   }
   return ret;
 }
@@ -810,7 +823,7 @@ int ObMPConnect::unlock_user_if_time_is_up(const uint64_t tenant_id,
   if (trans.is_started()) {
     int temp_ret = OB_SUCCESS;
     if (OB_SUCCESS != (temp_ret = trans.end(OB_SUCC(ret)))) {
-      LOG_WARN("trans end failed", "is_commit", OB_SUCC(ret), K(ret), K(temp_ret));
+      LOG_WARN("trans end failed", "is_commit", OB_SUCCESS == ret, K(ret), K(temp_ret));
       ret = OB_SUCC(ret) ? temp_ret : ret;
     }
   }
@@ -873,7 +886,7 @@ int ObMPConnect::unlock_user_if_time_is_up_mysql(const uint64_t tenant_id,
   if (trans.is_started()) {
     int temp_ret = OB_SUCCESS;
     if (OB_SUCCESS != (temp_ret = trans.end(OB_SUCC(ret)))) {
-      LOG_WARN("trans end failed", "is_commit", OB_SUCC(ret), K(ret), K(temp_ret));
+      LOG_WARN("trans end failed", "is_commit", OB_SUCCESS == ret, K(ret), K(temp_ret));
       ret = OB_SUCC(ret) ? temp_ret : ret;
     }
   }
@@ -945,7 +958,7 @@ int ObMPConnect::update_login_stat_in_trans(const uint64_t tenant_id,
   if (trans.is_started()) {
     int temp_ret = OB_SUCCESS;
     if (OB_SUCCESS != (temp_ret = trans.end(OB_SUCC(ret) && commit))) {
-      LOG_WARN("trans end failed", "is_commit", OB_SUCC(ret) && commit, K(ret), K(temp_ret));
+      LOG_WARN("trans end failed", "is_commit", OB_SUCCESS == ret && commit, K(ret), K(temp_ret));
       ret = OB_SUCC(ret) ? temp_ret : ret;
     }
   }
@@ -1039,7 +1052,7 @@ int ObMPConnect::update_login_stat_in_trans_mysql(const uint64_t tenant_id,
   if (trans.is_started()) {
     int temp_ret = OB_SUCCESS;
     if (OB_SUCCESS != (temp_ret = trans.end(OB_SUCC(ret)))) {
-      LOG_WARN("trans end failed", "is_commit", OB_SUCC(ret), K(ret), K(temp_ret));
+      LOG_WARN("trans end failed", "is_commit", OB_SUCCESS == ret, K(ret), K(temp_ret));
       ret = OB_SUCC(ret) ? temp_ret : ret;
     }
   }
@@ -1456,6 +1469,32 @@ int ObMPConnect::get_proxy_capability(uint64_t &cap) const
   return ret;
 }
 
+int ObMPConnect::get_client_attribute_capability(uint64_t &cap) const
+{
+  int ret = OB_SUCCESS;
+  cap = 0;
+  bool is_capability_flag_found = false;
+  ObStringKV kv;
+  for (int64_t i = 0; !is_capability_flag_found && i < hsr_.get_connect_attrs().count(); ++i) {
+    kv = hsr_.get_connect_attrs().at(i);
+    if (kv.key_ == OB_MYSQL_CLIENT_ATTRIBUTE_CAPABILITY_FLAG) {
+      is_capability_flag_found = true;
+    }
+  }
+
+  if (is_capability_flag_found) {
+    ObObj value;
+    value.set_varchar(kv.value_);
+    ObArenaAllocator allocator(ObModIds::OB_SQL_EXPR);
+    ObCastCtx cast_ctx(&allocator, NULL, CM_NONE, ObCharset::get_system_collation());
+    EXPR_GET_UINT64_V2(value, cap);
+    if (OB_FAIL(ret)) {
+      LOG_WARN("fail to cast client attribute capability flag to uint64", K_(kv.value), K(ret));
+    }
+  }
+  return ret;
+}
+
 int ObMPConnect::check_update_proxy_capability(ObSMConnection &conn) const
 {
   int ret = OB_SUCCESS;
@@ -1486,6 +1525,7 @@ int ObMPConnect::check_update_proxy_capability(ObSMConnection &conn) const
     server_proxy_cap_flag.cap_flags_.OB_CAP_PROXY_SESSIOIN_SYNC = 1;
     server_proxy_cap_flag.cap_flags_.OB_CAP_PROXY_FULL_LINK_TRACING = 1;
     server_proxy_cap_flag.cap_flags_.OB_CAP_PROXY_NEW_EXTRA_INFO = 1;
+    server_proxy_cap_flag.cap_flags_.OB_CAP_PROXY_SESSION_VAR_SYNC = 1;
     conn.proxy_cap_flags_.capability_ = (server_proxy_cap_flag.capability_ & client_proxy_cap);//if old java client, set it 0
 
     LOG_DEBUG("Negotiated capability",
@@ -1748,6 +1788,37 @@ int ObMPConnect::verify_connection(const uint64_t tenant_id) const
       LOG_INFO("server is initializing, ignore verify_ip_white_list", "status", GCTX.status_, K(ret));
     } else if (OB_FAIL(verify_ip_white_list(tenant_id))) {
       LOG_WARN("failed to verify_ip_white_list", K(ret));
+    } else {
+      const int64_t tenant_id = conn->tenant_id_;
+      if (OB_SYS_TENANT_ID == tenant_id ||
+          0 == user_name_.compare(OB_SYS_USER_NAME)) {
+        // sys tenant or root user is considered as vip
+      } else {
+        omt::ObTenantConfigGuard tenant_config(TENANT_CONF(tenant_id));
+        if (tenant_config.is_valid()) {
+          int64_t max_sess_num = 0;
+          int64_t sess_count = 0;
+          MTL_SWITCH(tenant_id) {
+            auto *tenant_base = MTL_CTX();
+            max_sess_num = tenant_base->get_max_session_num(tenant_config->_resource_limit_max_session_num);
+          } else {
+            /*ignore fails*/
+            ret = OB_SUCCESS;
+          }
+          if (max_sess_num != 0) {
+            bool tenant_exists = false;
+            uint64_t cur_connections = 0;
+            if (OB_FAIL(gctx_.conn_res_mgr_->get_tenant_cur_connections(tenant_id, tenant_exists,
+                                                                        cur_connections))) {
+              LOG_WARN("fail to get session count", K(ret));
+            } else if (tenant_exists && cur_connections >= max_sess_num) {
+              ret = OB_RESOURCE_OUT;
+              LOG_WARN("too much sessions", K(ret), K(tenant_id), K(cur_connections), K(max_sess_num),
+                       K(tenant_name_), K(user_name_));
+            }
+          }
+        }
+      }
     }
   }
   return ret;
@@ -1815,9 +1886,7 @@ int ObMPConnect::verify_identify(ObSMConnection &conn, ObSQLSessionInfo &session
   } else {
     session.update_last_active_time();
     SQL_REQ_OP.get_sock_desc(req_, session.get_sock_desc());
-    if (NULL != gctx_.sql_engine_) {
-      session.set_plan_cache_manager(gctx_.sql_engine_->get_plan_cache_manager());
-    }
+    SQL_REQ_OP.set_sql_session_to_sock_desc(req_, (void *)&session);
     session.set_peer_addr(get_peer());
     session.set_client_addr(get_peer());
     session.set_trans_type(transaction::ObTxClass::USER);
@@ -1992,7 +2061,13 @@ int ObMPConnect::update_charset_sys_vars(ObSMConnection &conn, ObSQLSessionInfo 
 {
   int ret = OB_SUCCESS;
   int64_t cs_type = conn.client_cs_type_;
-  if (ObCharset::is_valid_collation(cs_type)) {
+  const int64_t LATIN1_CS = 8;
+  //background: mysqltest give a default connect_charset=latin1
+  //            but for history reason, oceanbase use utf8 as
+  //            default charset for mysqltest
+  //TODO: after obclient&mysqltest support default charset = utf8
+  //      login for cs_type != LATIN1_CS would be deleted
+  if (cs_type != LATIN1_CS && ObCharset::is_valid_collation(cs_type)) {
     if (OB_FAIL(sess_info.update_sys_variable(SYS_VAR_CHARACTER_SET_CLIENT, cs_type))) {
       SQL_ENG_LOG(WARN, "failed to update sys var", K(ret));
     } else if (OB_FAIL(sess_info.update_sys_variable(SYS_VAR_CHARACTER_SET_RESULTS, cs_type))) {
@@ -2005,5 +2080,3 @@ int ObMPConnect::update_charset_sys_vars(ObSMConnection &conn, ObSQLSessionInfo 
   }
   return ret;
 }
-
-

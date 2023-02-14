@@ -21,6 +21,7 @@
 #include "observer/omt/ob_tenant_config_mgr.h"
 #include "pl/ob_pl.h"
 #include "sql/plan_cache/ob_cache_object_factory.h"
+#include "pl/pl_cache/ob_pl_cache_mgr.h"
 
 namespace oceanbase
 {
@@ -70,7 +71,7 @@ void ObPlanCacheManager::destroy()
          it != pcm_.end();
          it++) {
       if (OB_ISNULL(it->second)) {
-        BACKTRACE(ERROR, true, "plan_cache is null");
+        BACKTRACE_RET(ERROR, OB_ERR_UNEXPECTED, true, "plan_cache is null");
       } else {
         it->second->destroy();
       }
@@ -263,7 +264,6 @@ int ObPlanCacheManager::revert_plan_cache(const uint64_t &tenant_id)
                "pc ref_count", ppc->get_ref_count(),
                K(tenant_id));
     //cancel scheduled task
-    ppc->set_valid(false);
     ppc->dec_ref_count();
   } else if (OB_HASH_NOT_EXIST == tmp_ret) { // maybe erase by other thread
     SQL_PC_LOG(INFO, "Plan Cache not exist", K(tenant_id));
@@ -465,6 +465,20 @@ void ObPlanCacheManager::ObPlanCacheEliminationTask::run_free_cache_obj_task()
   }
 }
 
+int ObPlanCacheManager::evict_plan_by_table_name(uint64_t tenant_id, uint64_t database_id, ObString tab_name)
+{
+  int ret = OB_SUCCESS;
+  observer::ObReqTimeGuard req_timeinfo_guard;
+  ObPlanCache *plan_cache = get_plan_cache(tenant_id);
+  if (NULL != plan_cache) {
+    if (OB_FAIL(plan_cache->evict_plan_by_table_name(tenant_id, database_id, tab_name))) {
+      SQL_PC_LOG(WARN, "fail to evict plan by table name", K(ret));
+    }
+    plan_cache->dec_ref_count();
+  }
+  return ret;
+}
+
 int ObPlanCacheManager::flush_plan_cache_by_sql_id(uint64_t tenant_id,
                                                    uint64_t db_id,
                                                    common::ObString sql_id) {
@@ -582,7 +596,7 @@ int ObPlanCacheManager::flush_pl_cache(const uint64_t tenant_id)
   int64_t safe_timestamp = INT64_MAX;
   ObArray<AllocCacheObjInfo> deleted_objs;
   if (NULL != plan_cache) {
-    if (OB_FAIL(plan_cache->cache_evict_all_pl())) {
+    if (OB_FAIL(pl::ObPLCacheMgr::cache_evict_all_pl(plan_cache))) {
       SQL_PC_LOG(ERROR, "PL cache evict failed, please check", K(ret));
     } else if (OB_FAIL(observer::ObGlobalReqTimeService::get_instance()
                            .get_global_safe_timestamp(safe_timestamp))) {
@@ -742,7 +756,6 @@ int ObPlanCacheManager::revert_ps_cache(const uint64_t &tenant_id)
                K(tenant_id));
     //cancel scheduled task
     ppc->dec_ref_count();
-    ppc->set_valid(false);
   } else if (OB_HASH_NOT_EXIST == tmp_ret) { // maybe erase by other thread
     SQL_PC_LOG(INFO, "PS Plan Cache not exist", K(tenant_id));
   } else {

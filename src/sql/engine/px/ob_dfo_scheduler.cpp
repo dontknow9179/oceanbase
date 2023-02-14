@@ -251,18 +251,9 @@ int ObDfoSchedulerBasic::dispatch_bf_channel_info(ObExecContext &ctx,
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("phy plan ctx NULL", K(ret));
   } else if (parent.is_root_dfo()) {
-    if (ctx.get_bf_ctx().filter_ready_) {
-      ObPxBloomFilterChInfo &ch_set_info = ctx.get_bf_ctx().ch_set_info_;
-      ctx.get_bf_ctx().ch_set_.reset();
-      if (OB_FAIL(ObDtlChannelUtil::get_receive_bf_dtl_channel_set(
-          0, ch_set_info, ctx.get_bf_ctx().ch_set_))) {
-        LOG_WARN("failed to get receive dtl channel set", K(ret));
-      } else if (OB_FAIL(ObPxMsgProc::mark_rpc_filter(ctx))) {
-        LOG_WARN("fail to send rpc bloom filter", K(ret));
-      }
-    } else {
-      LOG_ERROR("unexpected status: filter ready must be true", K(ctx.get_bf_ctx().filter_ready_));
-    }
+    ret = OB_NOT_SUPPORTED;
+    LOG_WARN("not support root dfo send bloom filter", K(ret));
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "root dfo send bloom filter");
   } else {
     // send to dfo with receive operator
     ObArray<ObPxSqcMeta *> sqcs;
@@ -492,7 +483,7 @@ int ObSerialDfoScheduler::dispatch_sqcs(ObExecContext &exec_ctx,
       LOG_WARN("no memory", K(ret));
     }
   }
-  bool ignore_vtable_error = true;
+  bool ignore_vtable_error = dfo.is_ignore_vtable_error();
   if (OB_SUCC(ret)) {
     ObDfo *child_dfo = nullptr;
     for (int i = 0; i < dfo.get_child_count() && OB_SUCC(ret); ++i) {
@@ -535,6 +526,9 @@ int ObSerialDfoScheduler::dispatch_sqcs(ObExecContext &exec_ctx,
           coord_info_.enable_px_batch_rescan()) {
           sqc.set_transmit_use_interm_result(true);
         }
+        if (NULL != dfo.parent() && dfo.parent()->is_root_dfo()) {
+          sqc.set_adjoining_root_dfo(true);
+        }
         if (dfo.has_child_dfo()) {
           sqc.set_recieve_use_interm_result(true);
         }
@@ -552,7 +546,7 @@ int ObSerialDfoScheduler::dispatch_sqcs(ObExecContext &exec_ctx,
         } else if (FALSE_IT(sqc.set_need_report(true))) {
           // 必须发 rpc 之前设置为 true
           // 原因见 https://work.aone.alibaba-inc.com/issue/26536120
-        } else if (OB_FAIL(E(EventTable::EN_PX_SQC_INIT_FAILED) OB_SUCCESS)) {
+        } else if (OB_FAIL(OB_E(EventTable::EN_PX_SQC_INIT_FAILED) OB_SUCCESS)) {
           sqc.set_need_report(false);
           LOG_WARN("[SIM] server down. fail to init sqc", K(ret));
         } else if (OB_FAIL(proxy
@@ -561,7 +555,7 @@ int ObSerialDfoScheduler::dispatch_sqcs(ObExecContext &exec_ctx,
                           .fast_init_sqc(args, &sqc_cb))) {
           LOG_WARN("fail to init sqc", K(ret), K(sqc));
           sqc.set_need_report(false);
-          sqc.set_server_not_alive();
+          sqc.set_server_not_alive(true);
         }
       }
     }
@@ -1118,6 +1112,15 @@ int ObParallelDfoScheduler::dispatch_sqc(ObExecContext &exec_ctx,
       LOG_WARN("session is NULL", K(ret));
     }
   }
+  if (OB_SUCC(ret) && nullptr != dfo.parent() && dfo.parent()->is_root_dfo()) {
+    ARRAY_FOREACH(sqcs, idx) {
+      ObPxSqcMeta &sqc = *sqcs.at(idx);
+      sqc.set_adjoining_root_dfo(true);
+    }
+  }
+  // 分发 sqc 可能需要重试，
+  // 分发 sqc 的 rpc 成功，但 sqc 上无法分配最小个数的 worker 线程，`dispatch_sqc`内部进行重试，
+  // 如果多次重试（达到超时时间）都无法成功，不需要再重试整个DFO（因为已经超时）
   ObPxSqcAsyncProxy proxy(coord_info_.rpc_proxy_, dfo, exec_ctx, phy_plan_ctx, session, phy_plan, sqcs);
   if (OB_FAIL(ret)) {
   } else if (OB_FAIL(proxy.launch_all_rpc_request())) {
@@ -1139,11 +1142,20 @@ int ObParallelDfoScheduler::dispatch_sqc(ObExecContext &exec_ctx,
     const ObArray<ObSqcAsyncCB *> &callbacks = proxy.get_callbacks();
     for (int i = 0; i < callbacks.count(); ++i) {
       cb = callbacks.at(i);
+      ObPxSqcMeta &sqc = *sqcs.at(i);
       if (OB_NOT_NULL(cb) && cb->is_processed() &&
           OB_SUCCESS == cb->get_ret_code().rcode_ &&
           OB_SUCCESS == cb->get_result().rc_) {
-        ObPxSqcMeta &sqc = *sqcs.at(i);
         sqc.set_need_report(true);
+      } else if (!cb->is_processed()) {
+        // if init_sqc_msg is not processed and the msg may be sent successfully, set server not alive.
+        // then when qc waiting_all_dfo_exit, it will push sqc.access_table_locations into trans_result,
+        // and the query can be retried.
+        bool msg_not_send_out = (cb->get_error() == EASY_TIMEOUT_NOT_SENT_OUT
+                                || cb->get_error() == EASY_DISCONNECT_NOT_SENT_OUT);
+        if (!msg_not_send_out) {
+          sqc.set_server_not_alive(true);
+        }
       }
     }
   } else {
@@ -1160,8 +1172,8 @@ int ObParallelDfoScheduler::dispatch_sqc(ObExecContext &exec_ctx,
         pkt.rc_ = resp.rc_;
         pkt.task_count_ = resp.reserved_thread_count_;
         if (resp.reserved_thread_count_ < sqc.get_max_task_count()) {
-          LOG_INFO("SQC do not have enough thread, Downgraded thread allocation",
-                   K(resp), K(sqc));
+          LOG_TRACE("SQC don`t have enough thread or thread auto scaling, Downgraded thread allocation",
+              K(resp), K(sqc));
         }
         if (OB_FAIL(pkt.tablets_info_.assign(resp.partitions_info_))) {
           LOG_WARN("Failed to assign partition info", K(ret));

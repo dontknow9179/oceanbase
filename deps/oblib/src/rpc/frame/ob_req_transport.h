@@ -63,7 +63,7 @@ public:
   virtual ~EasySPAlloc() {}
   void *alloc(int64_t size) const
   {
-    return easy_pool_alloc(pool_, size);
+    return easy_pool_alloc(pool_, static_cast<uint32_t>(size));
   }
 private:
   easy_pool_t *pool_;
@@ -79,6 +79,8 @@ public:
     return common::ob_malloc(size, common::ObModIds::OB_RPC);
   }
 };
+
+easy_addr_t to_ez_addr(const common::ObAddr &addr);
 
 class ObReqTransport
 {
@@ -107,7 +109,7 @@ public:
     virtual bool get_cloned() = 0;
 
     // invoke when get a valid packet on protocol level, but can't decode it.
-    virtual void on_invalid() { RPC_FRAME_LOG(ERROR, "invalid packet"); }
+    virtual void on_invalid() { RPC_FRAME_LOG_RET(ERROR, common::OB_INVALID_ARGUMENT, "invalid packet"); }
     // invoke when can't get a valid or completed packet.
     virtual void on_timeout() { RPC_FRAME_LOG(DEBUG, "packet timeout"); }
     virtual int on_error(int err);
@@ -242,7 +244,6 @@ private:
   int balance_assign(easy_session_t *s) const;
   ObPacket *send_session(easy_session_t *s) const;
   int post_session(easy_session_t *s) const;
-  easy_addr_t to_ez_addr(const ObAddr &addr) const;
 
 private:
   static const int32_t OB_RPC_CONNECTION_COUNT_PER_THREAD = 1;

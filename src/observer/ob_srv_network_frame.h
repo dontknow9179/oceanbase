@@ -49,6 +49,7 @@ public:
   int high_prio_rpc_shutdown();
   int batch_rpc_shutdown();
   int unix_rpc_shutdown();
+  void sql_nio_stop();
   void wait();
   int stop();
 
@@ -65,7 +66,7 @@ public:
   rpc::frame::ObNetEasy *get_net_easy();
   void set_ratelimit_enable(int ratelimit_enabled);
   int reload_mysql_login_thread_config() {
-    int cnt = deliver_.get_mysql_login_thread_count_to_set(GCONF.sql_login_thread_count);
+    int cnt = deliver_.get_mysql_login_thread_count_to_set(static_cast<int32_t>(GCONF.sql_login_thread_count));
     return deliver_.set_mysql_login_thread_count(cnt);
   }
 private:

@@ -250,11 +250,39 @@ private:
   ObXACtx *ctx_;
 };
 
+// format id of dblink trans
+// from Oracle
+static const int32_t DBLINK_FORMAT_ID = 306206;
 class ObXADefault
 {
 public:
   static constexpr int64_t OB_XA_TIMEOUT_SECONDS = 60; /*60s*/
   static constexpr const char* OB_XA_TIMEOUT_NAME = "ob_xa_timeout";
+};
+
+class ObXAStatistics
+{
+public:
+  static ObXAStatistics &get_instance()
+  {
+    static ObXAStatistics xa_statistics_;
+    return xa_statistics_;
+  }
+  ~ObXAStatistics() {}
+public:
+  void inc_ctx_count() { ATOMIC_INC(&total_active_xa_ctx_count_); }
+  void dec_ctx_count() { ATOMIC_DEC(&total_active_xa_ctx_count_); }
+  void print_statistics(int64_t cur_ts);
+public:
+  TO_STRING_KV(K_(total_active_xa_ctx_count));
+private:
+  ObXAStatistics() : last_stat_ts_(0), total_active_xa_ctx_count_(0) {}
+  DISALLOW_COPY_AND_ASSIGN(ObXAStatistics);
+private:
+  static const int64_t STAT_INTERVAL = 10 * 1000 * 1000;
+private:
+  int64_t last_stat_ts_;
+  int64_t total_active_xa_ctx_count_;
 };
 
 }//transaction

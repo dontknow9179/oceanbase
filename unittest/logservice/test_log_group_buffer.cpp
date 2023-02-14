@@ -53,6 +53,7 @@ TestLogGroupBuffer::~TestLogGroupBuffer()
 
 void TestLogGroupBuffer::SetUp()
 {
+  ObMallocAllocator::get_instance()->create_and_add_tenant_allocator(1001);
   // init MTL
   ObTenantBase tbase(1001);
   ObTenantEnv::set_tenant(&tbase);
@@ -62,6 +63,7 @@ void TestLogGroupBuffer::TearDown()
 {
   PALF_LOG(INFO, "TestLogGroupBuffer has TearDown");
   PALF_LOG(INFO, "TearDown success");
+  ObMallocAllocator::get_instance()->recycle_tenant_allocator(1001);
 }
 
 TEST_F(TestLogGroupBuffer, test_init)
@@ -129,25 +131,6 @@ TEST_F(TestLogGroupBuffer, test_get_log_buf)
   EXPECT_EQ(OB_INVALID_ARGUMENT, log_group_buffer_.get_log_buf(lsn, len, log_buf));
   lsn.val_ = start_lsn.val_;
   EXPECT_EQ(OB_SUCCESS, log_group_buffer_.get_log_buf(lsn, len, log_buf));
-}
-
-TEST_F(TestLogGroupBuffer, test_wait)
-{
-  LSN lsn;
-  int64_t len = 0;
-  EXPECT_EQ(OB_NOT_INIT, log_group_buffer_.wait(lsn, len));
-  LSN start_lsn(100);
-  EXPECT_EQ(OB_SUCCESS, log_group_buffer_.init(start_lsn));
-  EXPECT_EQ(OB_INVALID_ARGUMENT, log_group_buffer_.wait(lsn, len));
-  lsn = start_lsn;
-  EXPECT_EQ(OB_INVALID_ARGUMENT, log_group_buffer_.wait(lsn, len));
-  len = 100;
-  lsn.val_ = start_lsn.val_ - 1;
-  EXPECT_EQ(OB_ERR_UNEXPECTED, log_group_buffer_.wait(lsn, len));
-  lsn.val_ = start_lsn.val_ + log_group_buffer_.get_available_buffer_size();
-  EXPECT_EQ(OB_EAGAIN, log_group_buffer_.wait(lsn, len));
-  lsn.val_ = start_lsn.val_ + 100;
-  EXPECT_EQ(OB_SUCCESS, log_group_buffer_.wait(lsn, len));
 }
 
 TEST_F(TestLogGroupBuffer, test_fill)

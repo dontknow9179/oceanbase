@@ -144,6 +144,7 @@ const char *ObSysVarFactory::SYS_VAR_NAMES_SORTED_BY_NAME[] = {
   "_set_last_archive_timestamp",
   "_set_purge_job_interval",
   "_set_purge_job_status",
+  "_set_reverse_dblink_infos",
   "_windowfunc_optimization_settings",
   "auto_increment_cache_size",
   "auto_increment_increment",
@@ -166,6 +167,7 @@ const char *ObSysVarFactory::SYS_VAR_NAMES_SORTED_BY_NAME[] = {
   "collation_server",
   "concurrent_insert",
   "connect_timeout",
+  "cte_max_recursion_depth",
   "cursor_sharing",
   "datadir",
   "debug_sync",
@@ -196,6 +198,7 @@ const char *ObSysVarFactory::SYS_VAR_NAMES_SORTED_BY_NAME[] = {
   "local_infile",
   "lock_wait_timeout",
   "log_bin",
+  "log_row_value_options",
   "long_query_time",
   "lower_case_table_names",
   "max_allowed_packet",
@@ -242,6 +245,7 @@ const char *ObSysVarFactory::SYS_VAR_NAMES_SORTED_BY_NAME[] = {
   "ob_interm_result_mem_limit",
   "ob_last_schema_version",
   "ob_log_level",
+  "ob_max_read_stale_time",
   "ob_org_cluster_id",
   "ob_pl_block_timeout",
   "ob_plan_cache_evict_high_percentage",
@@ -257,6 +261,7 @@ const char *ObSysVarFactory::SYS_VAR_NAMES_SORTED_BY_NAME[] = {
   "ob_route_policy",
   "ob_safe_weak_read_snapshot",
   "ob_sql_audit_percentage",
+  "ob_sql_plan_memory_percentage",
   "ob_sql_work_area_percentage",
   "ob_statement_trace_id",
   "ob_tcp_invited_nodes",
@@ -265,6 +270,7 @@ const char *ObSysVarFactory::SYS_VAR_NAMES_SORTED_BY_NAME[] = {
   "ob_trx_idle_timeout",
   "ob_trx_lock_timeout",
   "ob_trx_timeout",
+  "online_opt_stat_gather",
   "optimizer_capture_sql_plan_baselines",
   "optimizer_use_sql_plan_baselines",
   "parallel_servers_target",
@@ -280,6 +286,8 @@ const char *ObSysVarFactory::SYS_VAR_NAMES_SORTED_BY_NAME[] = {
   "query_cache_wlock_invalidate",
   "read_only",
   "recyclebin",
+  "regexp_stack_limit",
+  "regexp_time_limit",
   "resource_manager_plan",
   "secure_file_priv",
   "server_id",
@@ -362,6 +370,7 @@ const ObSysVarClassType ObSysVarFactory::SYS_VAR_IDS_SORTED_BY_NAME[] = {
   SYS_VAR__SET_LAST_ARCHIVE_TIMESTAMP,
   SYS_VAR__SET_PURGE_JOB_INTERVAL,
   SYS_VAR__SET_PURGE_JOB_STATUS,
+  SYS_VAR__SET_REVERSE_DBLINK_INFOS,
   SYS_VAR__WINDOWFUNC_OPTIMIZATION_SETTINGS,
   SYS_VAR_AUTO_INCREMENT_CACHE_SIZE,
   SYS_VAR_AUTO_INCREMENT_INCREMENT,
@@ -384,6 +393,7 @@ const ObSysVarClassType ObSysVarFactory::SYS_VAR_IDS_SORTED_BY_NAME[] = {
   SYS_VAR_COLLATION_SERVER,
   SYS_VAR_CONCURRENT_INSERT,
   SYS_VAR_CONNECT_TIMEOUT,
+  SYS_VAR_CTE_MAX_RECURSION_DEPTH,
   SYS_VAR_CURSOR_SHARING,
   SYS_VAR_DATADIR,
   SYS_VAR_DEBUG_SYNC,
@@ -414,6 +424,7 @@ const ObSysVarClassType ObSysVarFactory::SYS_VAR_IDS_SORTED_BY_NAME[] = {
   SYS_VAR_LOCAL_INFILE,
   SYS_VAR_LOCK_WAIT_TIMEOUT,
   SYS_VAR_LOG_BIN,
+  SYS_VAR_LOG_ROW_VALUE_OPTIONS,
   SYS_VAR_LONG_QUERY_TIME,
   SYS_VAR_LOWER_CASE_TABLE_NAMES,
   SYS_VAR_MAX_ALLOWED_PACKET,
@@ -460,6 +471,7 @@ const ObSysVarClassType ObSysVarFactory::SYS_VAR_IDS_SORTED_BY_NAME[] = {
   SYS_VAR_OB_INTERM_RESULT_MEM_LIMIT,
   SYS_VAR_OB_LAST_SCHEMA_VERSION,
   SYS_VAR_OB_LOG_LEVEL,
+  SYS_VAR_OB_MAX_READ_STALE_TIME,
   SYS_VAR_OB_ORG_CLUSTER_ID,
   SYS_VAR_OB_PL_BLOCK_TIMEOUT,
   SYS_VAR_OB_PLAN_CACHE_EVICT_HIGH_PERCENTAGE,
@@ -475,6 +487,7 @@ const ObSysVarClassType ObSysVarFactory::SYS_VAR_IDS_SORTED_BY_NAME[] = {
   SYS_VAR_OB_ROUTE_POLICY,
   SYS_VAR_OB_SAFE_WEAK_READ_SNAPSHOT,
   SYS_VAR_OB_SQL_AUDIT_PERCENTAGE,
+  SYS_VAR_OB_SQL_PLAN_MEMORY_PERCENTAGE,
   SYS_VAR_OB_SQL_WORK_AREA_PERCENTAGE,
   SYS_VAR_OB_STATEMENT_TRACE_ID,
   SYS_VAR_OB_TCP_INVITED_NODES,
@@ -483,6 +496,7 @@ const ObSysVarClassType ObSysVarFactory::SYS_VAR_IDS_SORTED_BY_NAME[] = {
   SYS_VAR_OB_TRX_IDLE_TIMEOUT,
   SYS_VAR_OB_TRX_LOCK_TIMEOUT,
   SYS_VAR_OB_TRX_TIMEOUT,
+  SYS_VAR_ONLINE_OPT_STAT_GATHER,
   SYS_VAR_OPTIMIZER_CAPTURE_SQL_PLAN_BASELINES,
   SYS_VAR_OPTIMIZER_USE_SQL_PLAN_BASELINES,
   SYS_VAR_PARALLEL_SERVERS_TARGET,
@@ -498,6 +512,8 @@ const ObSysVarClassType ObSysVarFactory::SYS_VAR_IDS_SORTED_BY_NAME[] = {
   SYS_VAR_QUERY_CACHE_WLOCK_INVALIDATE,
   SYS_VAR_READ_ONLY,
   SYS_VAR_RECYCLEBIN,
+  SYS_VAR_REGEXP_STACK_LIMIT,
+  SYS_VAR_REGEXP_TIME_LIMIT,
   SYS_VAR_RESOURCE_MANAGER_PLAN,
   SYS_VAR_SECURE_FILE_PRIV,
   SYS_VAR_SERVER_ID,
@@ -648,6 +664,9 @@ const char *ObSysVarFactory::SYS_VAR_NAMES_SORTED_BY_ID[] = {
   "log_bin",
   "server_uuid",
   "default_storage_engine",
+  "cte_max_recursion_depth",
+  "regexp_stack_limit",
+  "regexp_time_limit",
   "ob_interm_result_mem_limit",
   "ob_proxy_partition_hit",
   "ob_log_level",
@@ -768,7 +787,12 @@ const char *ObSysVarFactory::SYS_VAR_NAMES_SORTED_BY_ID[] = {
   "sql_notes",
   "innodb_strict_mode",
   "_windowfunc_optimization_settings",
-  "ob_enable_rich_error_msg"
+  "ob_enable_rich_error_msg",
+  "ob_sql_plan_memory_percentage",
+  "log_row_value_options",
+  "ob_max_read_stale_time",
+  "online_opt_stat_gather",
+  "_set_reverse_dblink_infos"
 };
 
 bool ObSysVarFactory::sys_var_name_case_cmp(const char *name1, const ObString &name2)
@@ -1030,6 +1054,9 @@ int ObSysVarFactory::create_all_sys_vars()
         + sizeof(ObSysVarLogBin)
         + sizeof(ObSysVarServerUuid)
         + sizeof(ObSysVarDefaultStorageEngine)
+        + sizeof(ObSysVarCteMaxRecursionDepth)
+        + sizeof(ObSysVarRegexpStackLimit)
+        + sizeof(ObSysVarRegexpTimeLimit)
         + sizeof(ObSysVarObIntermResultMemLimit)
         + sizeof(ObSysVarObProxyPartitionHit)
         + sizeof(ObSysVarObLogLevel)
@@ -1151,6 +1178,11 @@ int ObSysVarFactory::create_all_sys_vars()
         + sizeof(ObSysVarInnodbStrictMode)
         + sizeof(ObSysVarWindowfuncOptimizationSettings)
         + sizeof(ObSysVarObEnableRichErrorMsg)
+        + sizeof(ObSysVarObSqlPlanMemoryPercentage)
+        + sizeof(ObSysVarLogRowValueOptions)
+        + sizeof(ObSysVarObMaxReadStaleTime)
+        + sizeof(ObSysVarOnlineOptStatGather)
+        + sizeof(ObSysVarSetReverseDblinkInfos)
         ;
     void *ptr = NULL;
     if (OB_ISNULL(ptr = allocator_.alloc(total_mem_size))) {
@@ -2003,6 +2035,33 @@ int ObSysVarFactory::create_all_sys_vars()
       } else {
         store_buf_[ObSysVarsToIdxMap::get_store_idx(static_cast<int64_t>(SYS_VAR_DEFAULT_STORAGE_ENGINE))] = sys_var_ptr;
         ptr = (void *)((char *)ptr + sizeof(ObSysVarDefaultStorageEngine));
+      }
+    }
+    if (OB_SUCC(ret)) {
+      if (OB_ISNULL(sys_var_ptr = new (ptr)ObSysVarCteMaxRecursionDepth())) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_ERROR("fail to new ObSysVarCteMaxRecursionDepth", K(ret));
+      } else {
+        store_buf_[ObSysVarsToIdxMap::get_store_idx(static_cast<int64_t>(SYS_VAR_CTE_MAX_RECURSION_DEPTH))] = sys_var_ptr;
+        ptr = (void *)((char *)ptr + sizeof(ObSysVarCteMaxRecursionDepth));
+      }
+    }
+    if (OB_SUCC(ret)) {
+      if (OB_ISNULL(sys_var_ptr = new (ptr)ObSysVarRegexpStackLimit())) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_ERROR("fail to new ObSysVarRegexpStackLimit", K(ret));
+      } else {
+        store_buf_[ObSysVarsToIdxMap::get_store_idx(static_cast<int64_t>(SYS_VAR_REGEXP_STACK_LIMIT))] = sys_var_ptr;
+        ptr = (void *)((char *)ptr + sizeof(ObSysVarRegexpStackLimit));
+      }
+    }
+    if (OB_SUCC(ret)) {
+      if (OB_ISNULL(sys_var_ptr = new (ptr)ObSysVarRegexpTimeLimit())) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_ERROR("fail to new ObSysVarRegexpTimeLimit", K(ret));
+      } else {
+        store_buf_[ObSysVarsToIdxMap::get_store_idx(static_cast<int64_t>(SYS_VAR_REGEXP_TIME_LIMIT))] = sys_var_ptr;
+        ptr = (void *)((char *)ptr + sizeof(ObSysVarRegexpTimeLimit));
       }
     }
     if (OB_SUCC(ret)) {
@@ -3094,6 +3153,51 @@ int ObSysVarFactory::create_all_sys_vars()
         ptr = (void *)((char *)ptr + sizeof(ObSysVarObEnableRichErrorMsg));
       }
     }
+    if (OB_SUCC(ret)) {
+      if (OB_ISNULL(sys_var_ptr = new (ptr)ObSysVarObSqlPlanMemoryPercentage())) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_ERROR("fail to new ObSysVarObSqlPlanMemoryPercentage", K(ret));
+      } else {
+        store_buf_[ObSysVarsToIdxMap::get_store_idx(static_cast<int64_t>(SYS_VAR_OB_SQL_PLAN_MEMORY_PERCENTAGE))] = sys_var_ptr;
+        ptr = (void *)((char *)ptr + sizeof(ObSysVarObSqlPlanMemoryPercentage));
+      }
+    }
+    if (OB_SUCC(ret)) {
+      if (OB_ISNULL(sys_var_ptr = new (ptr)ObSysVarLogRowValueOptions())) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_ERROR("fail to new ObSysVarLogRowValueOptions", K(ret));
+      } else {
+        store_buf_[ObSysVarsToIdxMap::get_store_idx(static_cast<int64_t>(SYS_VAR_LOG_ROW_VALUE_OPTIONS))] = sys_var_ptr;
+        ptr = (void *)((char *)ptr + sizeof(ObSysVarLogRowValueOptions));
+      }
+    }
+    if (OB_SUCC(ret)) {
+      if (OB_ISNULL(sys_var_ptr = new (ptr)ObSysVarObMaxReadStaleTime())) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_ERROR("fail to new ObSysVarObMaxReadStaleTime", K(ret));
+      } else {
+        store_buf_[ObSysVarsToIdxMap::get_store_idx(static_cast<int64_t>(SYS_VAR_OB_MAX_READ_STALE_TIME))] = sys_var_ptr;
+        ptr = (void *)((char *)ptr + sizeof(ObSysVarObMaxReadStaleTime));
+      }
+    }
+    if (OB_SUCC(ret)) {
+      if (OB_ISNULL(sys_var_ptr = new (ptr)ObSysVarOnlineOptStatGather())) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_ERROR("fail to new ObSysVarOnlineOptStatGather", K(ret));
+      } else {
+        store_buf_[ObSysVarsToIdxMap::get_store_idx(static_cast<int64_t>(SYS_VAR_ONLINE_OPT_STAT_GATHER))] = sys_var_ptr;
+        ptr = (void *)((char *)ptr + sizeof(ObSysVarOnlineOptStatGather));
+      }
+    }
+    if (OB_SUCC(ret)) {
+      if (OB_ISNULL(sys_var_ptr = new (ptr)ObSysVarSetReverseDblinkInfos())) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_ERROR("fail to new ObSysVarSetReverseDblinkInfos", K(ret));
+      } else {
+        store_buf_[ObSysVarsToIdxMap::get_store_idx(static_cast<int64_t>(SYS_VAR__SET_REVERSE_DBLINK_INFOS))] = sys_var_ptr;
+        ptr = (void *)((char *)ptr + sizeof(ObSysVarSetReverseDblinkInfos));
+      }
+    }
 
   }
   return ret;
@@ -4151,6 +4255,39 @@ int ObSysVarFactory::create_sys_var(ObSysVarClassType sys_var_id, ObBasicSysVar 
       } else if (OB_ISNULL(sys_var_ptr = new (ptr)ObSysVarDefaultStorageEngine())) {
         ret = OB_ALLOCATE_MEMORY_FAILED;
         LOG_ERROR("fail to new ObSysVarDefaultStorageEngine", K(ret));
+      }
+      break;
+    }
+    case SYS_VAR_CTE_MAX_RECURSION_DEPTH: {
+      void *ptr = NULL;
+      if (OB_ISNULL(ptr = allocator_.alloc(sizeof(ObSysVarCteMaxRecursionDepth)))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_ERROR("fail to alloc memory", K(ret), K(sizeof(ObSysVarCteMaxRecursionDepth)));
+      } else if (OB_ISNULL(sys_var_ptr = new (ptr)ObSysVarCteMaxRecursionDepth())) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_ERROR("fail to new ObSysVarCteMaxRecursionDepth", K(ret));
+      }
+      break;
+    }
+    case SYS_VAR_REGEXP_STACK_LIMIT: {
+      void *ptr = NULL;
+      if (OB_ISNULL(ptr = allocator_.alloc(sizeof(ObSysVarRegexpStackLimit)))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_ERROR("fail to alloc memory", K(ret), K(sizeof(ObSysVarRegexpStackLimit)));
+      } else if (OB_ISNULL(sys_var_ptr = new (ptr)ObSysVarRegexpStackLimit())) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_ERROR("fail to new ObSysVarRegexpStackLimit", K(ret));
+      }
+      break;
+    }
+    case SYS_VAR_REGEXP_TIME_LIMIT: {
+      void *ptr = NULL;
+      if (OB_ISNULL(ptr = allocator_.alloc(sizeof(ObSysVarRegexpTimeLimit)))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_ERROR("fail to alloc memory", K(ret), K(sizeof(ObSysVarRegexpTimeLimit)));
+      } else if (OB_ISNULL(sys_var_ptr = new (ptr)ObSysVarRegexpTimeLimit())) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_ERROR("fail to new ObSysVarRegexpTimeLimit", K(ret));
       }
       break;
     }
@@ -5482,6 +5619,61 @@ int ObSysVarFactory::create_sys_var(ObSysVarClassType sys_var_id, ObBasicSysVar 
       } else if (OB_ISNULL(sys_var_ptr = new (ptr)ObSysVarObEnableRichErrorMsg())) {
         ret = OB_ALLOCATE_MEMORY_FAILED;
         LOG_ERROR("fail to new ObSysVarObEnableRichErrorMsg", K(ret));
+      }
+      break;
+    }
+    case SYS_VAR_OB_SQL_PLAN_MEMORY_PERCENTAGE: {
+      void *ptr = NULL;
+      if (OB_ISNULL(ptr = allocator_.alloc(sizeof(ObSysVarObSqlPlanMemoryPercentage)))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_ERROR("fail to alloc memory", K(ret), K(sizeof(ObSysVarObSqlPlanMemoryPercentage)));
+      } else if (OB_ISNULL(sys_var_ptr = new (ptr)ObSysVarObSqlPlanMemoryPercentage())) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_ERROR("fail to new ObSysVarObSqlPlanMemoryPercentage", K(ret));
+      }
+      break;
+    }
+    case SYS_VAR_LOG_ROW_VALUE_OPTIONS: {
+      void *ptr = NULL;
+      if (OB_ISNULL(ptr = allocator_.alloc(sizeof(ObSysVarLogRowValueOptions)))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_ERROR("fail to alloc memory", K(ret), K(sizeof(ObSysVarLogRowValueOptions)));
+      } else if (OB_ISNULL(sys_var_ptr = new (ptr)ObSysVarLogRowValueOptions())) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_ERROR("fail to new ObSysVarLogRowValueOptions", K(ret));
+      }
+      break;
+    }
+    case SYS_VAR_OB_MAX_READ_STALE_TIME: {
+      void *ptr = NULL;
+      if (OB_ISNULL(ptr = allocator_.alloc(sizeof(ObSysVarObMaxReadStaleTime)))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_ERROR("fail to alloc memory", K(ret), K(sizeof(ObSysVarObMaxReadStaleTime)));
+      } else if (OB_ISNULL(sys_var_ptr = new (ptr)ObSysVarObMaxReadStaleTime())) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_ERROR("fail to new ObSysVarObMaxReadStaleTime", K(ret));
+      }
+      break;
+    }
+    case SYS_VAR_ONLINE_OPT_STAT_GATHER: {
+      void *ptr = NULL;
+      if (OB_ISNULL(ptr = allocator_.alloc(sizeof(ObSysVarOnlineOptStatGather)))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_ERROR("fail to alloc memory", K(ret), K(sizeof(ObSysVarOnlineOptStatGather)));
+      } else if (OB_ISNULL(sys_var_ptr = new (ptr)ObSysVarOnlineOptStatGather())) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_ERROR("fail to new ObSysVarOnlineOptStatGather", K(ret));
+      }
+      break;
+    }
+    case SYS_VAR__SET_REVERSE_DBLINK_INFOS: {
+      void *ptr = NULL;
+      if (OB_ISNULL(ptr = allocator_.alloc(sizeof(ObSysVarSetReverseDblinkInfos)))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_ERROR("fail to alloc memory", K(ret), K(sizeof(ObSysVarSetReverseDblinkInfos)));
+      } else if (OB_ISNULL(sys_var_ptr = new (ptr)ObSysVarSetReverseDblinkInfos())) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_ERROR("fail to new ObSysVarSetReverseDblinkInfos", K(ret));
       }
       break;
     }

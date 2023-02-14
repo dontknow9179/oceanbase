@@ -31,7 +31,7 @@ ObBackupLeaseService::ObBackupLeaseService()
   : is_inited_(false),
     can_be_leader_ts_(0),
     expect_round_(0),
-    lock_(),
+    lock_(common::ObLatchIds::BACKUP_LOCK),
     backup_lease_info_mgr_(),
     lease_info_(),
     sql_proxy_(nullptr),
@@ -310,7 +310,7 @@ void ObBackupLeaseService::run1()
 
   while(!has_set_stop()) {
     if (OB_SUCCESS != (tmp_ret = renew_lease_())) {
-      LOG_WARN("failed to renew lease", K(tmp_ret));
+      LOG_WARN_RET(tmp_ret, "failed to renew lease", K(tmp_ret));
     }
     do_idle(tmp_ret);
   }

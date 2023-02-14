@@ -27,6 +27,7 @@ namespace common {
  */
 class ObOptTableStat : public common::ObIKVCacheValue
 {
+  OB_UNIS_VERSION_V(1);
 public:
   struct Key : public common::ObIKVCacheKey
   {
@@ -121,7 +122,8 @@ public:
       data_version_(0),
       last_analyzed_(0),
       stattype_locked_(0),
-      modified_count_(0) {}
+      modified_count_(0),
+      sample_size_(0) {}
   ObOptTableStat(uint64_t table_id,
                  int64_t partition_id,
                  int64_t object_type,
@@ -150,9 +152,12 @@ public:
       data_version_(data_version),
       last_analyzed_(0),
       stattype_locked_(0),
-      modified_count_(0) {}
+      modified_count_(0),
+      sample_size_(0) {}
 
   virtual ~ObOptTableStat() {}
+
+  int merge_table_stat(const ObOptTableStat &other);
 
   uint64_t get_table_id() const { return table_id_; }
   void set_table_id(uint64_t table_id) { table_id_ = table_id; }
@@ -169,7 +174,9 @@ public:
   int64_t get_row_count() const { return row_count_; }
   void set_row_count(int64_t rc) { row_count_ = rc; }
 
-  int64_t get_avg_row_size() const { return avg_row_size_; }
+  int64_t get_avg_row_size() const { return (int64_t)avg_row_size_; }
+  // can't be overload, so we just use the args to pass avg_len.
+  void get_avg_row_size(double &avg_len) const { avg_len = avg_row_size_; }
   void set_avg_row_size(int64_t avg_len) { avg_row_size_ = avg_len; }
 
   int64_t get_sstable_avg_row_size() const { return sstable_avg_row_size_; }
@@ -202,6 +209,25 @@ public:
   int64_t get_modified_count() const { return modified_count_; }
   void set_modified_count(int64_t modified_count) {  modified_count_ = modified_count; }
 
+  int64_t get_sample_size() const { return sample_size_; }
+  void set_sample_size(int64_t sample_size) {  sample_size_ = sample_size; }
+
+  void add_row_count(int64_t rc) { row_count_ += rc; }
+
+  // for multi rows
+  void add_avg_row_size(double avg_row_size, int64_t rc) {
+    SQL_LOG(DEBUG, "INFO", K(partition_id_));
+    SQL_LOG(DEBUG, "MERGE TABLE AVG LEN", K(avg_row_size_), K(row_count_), K(avg_row_size), K(rc));
+    if (row_count_ + rc != 0) {
+      avg_row_size_ = (avg_row_size_ * row_count_ + avg_row_size * rc) / (row_count_ + rc);
+      SQL_LOG(DEBUG, "avg size ", K(avg_row_size_));
+    }
+  }
+  // for one row
+  void add_avg_row_size(int64_t avg_row_size) {
+    add_avg_row_size((double)avg_row_size, 1);
+  }
+
   virtual int64_t size() const
   {
     return sizeof(*this);
@@ -218,6 +244,21 @@ public:
       tstat = new (buf) ObOptTableStat();
       *tstat = *this;
       value = tstat;
+    }
+    return ret;
+  }
+
+  virtual int deep_copy(char *buf, const int64_t buf_len, ObOptTableStat *&stat) const
+  {
+    int ret = OB_SUCCESS;
+    ObOptTableStat *tstat = nullptr;
+    if (nullptr == buf || buf_len < size()) {
+      ret = OB_INVALID_ARGUMENT;
+      COMMON_LOG(WARN, "invalid argument.", K(ret), KP(buf), K(buf_len), K(size()));
+    } else {
+      tstat = new (buf) ObOptTableStat();
+      *tstat = *this;
+      stat = tstat;
     }
     return ret;
   }
@@ -245,6 +286,7 @@ public:
     last_analyzed_ = 0;
     stattype_locked_ = 0;
     modified_count_ = 0;
+    sample_size_ = 0;
   }
 
   TO_STRING_KV(K(table_id_),
@@ -262,7 +304,8 @@ public:
                K(data_version_),
                K(last_analyzed_),
                K(stattype_locked_),
-               K(modified_count_));
+               K(modified_count_),
+               K(sample_size_));
 
 private:
   uint64_t table_id_;
@@ -270,7 +313,7 @@ private:
   int64_t object_type_;
 
   int64_t row_count_;
-  int64_t avg_row_size_;
+  double avg_row_size_;
 
   int64_t sstable_row_count_;
   int64_t memtable_row_count_;
@@ -283,6 +326,7 @@ private:
   int64_t last_analyzed_;
   uint64_t stattype_locked_;
   int64_t modified_count_;
+  int64_t sample_size_;
 };
 
 }

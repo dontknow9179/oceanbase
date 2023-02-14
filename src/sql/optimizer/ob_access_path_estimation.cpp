@@ -17,10 +17,12 @@
 #include "sql/optimizer/ob_storage_estimator.h"
 #include "share/stat/ob_opt_stat_manager.h"
 #include "sql/engine/table/ob_table_scan_op.h"
+#include "ob_opt_est_parameter_normal.h"
 namespace oceanbase {
 using namespace share::schema;
 using namespace share;
 namespace sql {
+static const int64_t SPATIAL_ROWKEY_MIN_NUM = 3;
 
 /// It is possible for us to find a better way to combine differnt kinds of cardinality
 /// estimation methods. e.g. if a table is found to be uniformally distributed over partitions,
@@ -134,7 +136,7 @@ int ObAccessPathEstimation::process_storage_estimation(ObOptimizerContext &ctx,
   
   bool force_leader_estimation = false;
   
-  force_leader_estimation = OB_FAIL(E(EventTable::EN_LEADER_STORAGE_ESTIMATION) OB_SUCCESS);
+  force_leader_estimation = OB_FAIL(OB_E(EventTable::EN_LEADER_STORAGE_ESTIMATION) OB_SUCCESS);
   ret = OB_SUCCESS;
 
   // for each access path, find a partition/server for estimation
@@ -353,11 +355,16 @@ int ObAccessPathEstimation::estimate_prefix_range_rowcount(
   logical_row_count  *= est_cost_info.pushdown_prefix_filter_sel_;
   physical_row_count *= est_cost_info.pushdown_prefix_filter_sel_;
 
+  // skip scan postfix range conditions
+  logical_row_count   *= est_cost_info.ss_postfix_range_filters_sel_;
+  physical_row_count  *= est_cost_info.ss_postfix_range_filters_sel_;
+
   LOG_TRACE("OPT:[STORAGE EST ROW COUNT]",
             K(logical_row_count), K(physical_row_count),
             K(get_range_count), K(scan_range_count),
             K(range_sample_ratio), K(result), K(est_cost_info.index_meta_info_.index_part_count_),
-            K(est_cost_info.pushdown_prefix_filter_sel_));
+            K(est_cost_info.pushdown_prefix_filter_sel_),
+            K(est_cost_info.ss_postfix_range_filters_sel_));
   return ret;
 }
 
@@ -403,7 +410,15 @@ int ObAccessPathEstimation::fill_cost_table_scan_info(ObCostTableScanInfo &est_c
       * est_cost_info.postfix_filter_sel_
       * est_cost_info.table_filter_sel_;
 
-  if (OB_SUCC(ret)) {
+  if (OB_FAIL(ret)) {
+  } else if (!est_cost_info.ss_ranges_.empty()) {
+    int64_t scan_range_count = get_scan_range_count(est_cost_info.ss_ranges_);
+    if (scan_range_count == 1) {
+      est_cost_info.batch_type_ = ObSimpleBatch::T_MULTI_SCAN;
+    } else {
+      est_cost_info.batch_type_ = ObSimpleBatch::T_MULTI_GET;
+    }
+  } else {
     int64_t get_range_count = get_get_range_count(est_cost_info.ranges_);
     int64_t scan_range_count = get_scan_range_count(est_cost_info.ranges_);
     if (get_range_count + scan_range_count > 1) {
@@ -466,7 +481,8 @@ int ObAccessPathEstimation::add_index_info(ObOptimizerContext &ctx,
     for (int64_t i = 0; ap->is_global_index_ && i < scan_ranges.count(); ++i) {
       scan_ranges.at(i).table_id_ = ap->index_id_;
     }
-    if (scan_ranges.count() > ObOptEstCost::MAX_STORAGE_RANGE_ESTIMATION_NUM) {
+    bool is_spatial_index = ap->est_cost_info_.index_meta_info_.is_geo_index_;
+    if (!is_spatial_index && scan_ranges.count() > ObOptEstCost::MAX_STORAGE_RANGE_ESTIMATION_NUM) {
       ObArray<common::ObNewRange> valid_ranges;
       for (int64_t i = 0; OB_SUCC(ret) && i < ObOptEstCost::MAX_STORAGE_RANGE_ESTIMATION_NUM; ++i) {
         if (OB_FAIL(valid_ranges.push_back(scan_ranges.at(i)))) {
@@ -480,8 +496,10 @@ int ObAccessPathEstimation::add_index_info(ObOptimizerContext &ctx,
       }
     }
     if (OB_SUCC(ret)) {
-      if (OB_FAIL(construct_scan_range_batch(allocator, scan_ranges, index_est_arg->batch_))) {
+      if (!is_spatial_index && OB_FAIL(construct_scan_range_batch(allocator, scan_ranges, index_est_arg->batch_))) {
         LOG_WARN("failed to construct scan range batch", K(ret));
+      } else if (is_spatial_index && OB_FAIL(construct_geo_scan_range_batch(allocator, scan_ranges, index_est_arg->batch_))) {
+        LOG_WARN("failed to construct spatial scan range batch", K(ret));
       }
     }
   }
@@ -502,6 +520,12 @@ int ObAccessPathEstimation::process_statistics_estimation(const ObTableMetaInfo 
                        path->est_cost_info_,
                        path->parent_->get_plan()->get_predicate_selectivities()))) {
     LOG_WARN("failed to calculate filter selectivity", K(ret));
+  } else if (OB_FAIL(calc_skip_scan_prefix_ndv(*path, path->est_cost_info_.ss_prefix_ndv_))) {
+    LOG_WARN("failed to calc skip scan prefix ndv", K(ret));
+  } else if (OB_FAIL(update_use_skip_scan(path->est_cost_info_,
+                                          path->parent_->get_plan()->get_predicate_selectivities(),
+                                          path->use_skip_scan_))) {
+    LOG_WARN("failed to update use skip scan", K(ret));
   } else {
     ObArenaAllocator allocator;
     ObCostTableScanInfo &est_cost_info = path->est_cost_info_;
@@ -529,9 +553,14 @@ int ObAccessPathEstimation::process_statistics_estimation(const ObTableMetaInfo 
     logical_row_count  *= est_cost_info.pushdown_prefix_filter_sel_;
     physical_row_count *= est_cost_info.pushdown_prefix_filter_sel_;
 
+    // skip scan postfix range conditions
+    logical_row_count   *= est_cost_info.ss_postfix_range_filters_sel_;
+    physical_row_count  *= est_cost_info.ss_postfix_range_filters_sel_;
+
     LOG_TRACE("OPT:[STATISTIC EST ROW COUNT",
               K(logical_row_count), K(physical_row_count),
-              K(est_cost_info.pushdown_prefix_filter_sel_));
+              K(est_cost_info.pushdown_prefix_filter_sel_),
+              K(est_cost_info.ss_postfix_range_filters_sel_));
 
     RowCountEstMethod est_method = meta.has_opt_stat_ ? RowCountEstMethod::BASIC_STAT :
                                                         RowCountEstMethod::DEFAULT_STAT;
@@ -542,6 +571,147 @@ int ObAccessPathEstimation::process_statistics_estimation(const ObTableMetaInfo 
                                   logical_row_count,
                                   physical_row_count,
                                   path->index_back_row_count_));
+  }
+  return ret;
+}
+
+// calculate skip scan prefix range columns NDV and postfix range conditions selectivity.
+// use the table_metas and origin_rows after extract prefix range.
+int ObAccessPathEstimation::calc_skip_scan_prefix_ndv(AccessPath &ap, double &prefix_ndv)
+{
+  int ret = OB_SUCCESS;
+  prefix_ndv = 1.0;
+  ObJoinOrder *join_order = NULL;
+  ObLogPlan *log_plan = NULL;
+  const ObTableMetaInfo *table_meta_info = NULL;
+  if (OB_ISNULL(ap.pre_query_range_) || !ap.pre_query_range_->is_ss_range()
+      || OptSkipScanState::SS_DISABLE == ap.use_skip_scan_) {
+    /* do nothing */
+  } else if (OB_ISNULL(join_order = ap.parent_) || OB_ISNULL(log_plan = join_order->get_plan())
+             || OB_ISNULL(table_meta_info = ap.est_cost_info_.table_meta_info_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get unexpected null",  K(ret), K(join_order), K(log_plan), K(table_meta_info));
+  } else {
+    // generate temporary update table metas use prefix range conditions
+    SMART_VAR(OptTableMetas, tmp_metas) {
+      ObSEArray<ObRawExpr*, 4> prefix_exprs;
+      const double prefix_range_row_count = table_meta_info->table_row_count_
+                                            * ap.est_cost_info_.prefix_filter_sel_
+                                            * ap.est_cost_info_.pushdown_prefix_filter_sel_;
+      const EqualSets *temp_equal_sets = log_plan->get_selectivity_ctx().get_equal_sets();
+      const double temp_rows = log_plan->get_selectivity_ctx().get_current_rows();
+      log_plan->get_selectivity_ctx().init_op_ctx(&join_order->get_output_equal_sets(), prefix_range_row_count);
+      if (OB_FAIL(get_skip_scan_prefix_exprs(ap.est_cost_info_.range_columns_,
+                                            ap.pre_query_range_->get_skip_scan_offset(),
+                                            prefix_exprs))) {
+        LOG_WARN("failed to get skip scan prefix expers", K(ret));
+      } else if (OB_FAIL(ObOptSelectivity::update_table_meta_info(log_plan->get_basic_table_metas(),
+                                                                  tmp_metas,
+                                                                  log_plan->get_selectivity_ctx(),
+                                                                  ap.get_table_id(),
+                                                                  prefix_range_row_count,
+                                                                  ap.pre_query_range_->get_range_exprs(),
+                                                                  log_plan->get_predicate_selectivities()))) {
+        LOG_WARN("failed to update table meta info", K(ret));
+      } else if (OB_FAIL(ObOptSelectivity::calculate_distinct(tmp_metas,
+                                                              log_plan->get_selectivity_ctx(),
+                                                              prefix_exprs,
+                                                              prefix_range_row_count,
+                                                              prefix_ndv))) {
+        LOG_WARN("failed to calculate distinct", K(ret), K(prefix_exprs));
+      } else {
+        double refine_ndv = 1.0;
+        prefix_ndv = std::max(refine_ndv, prefix_ndv);
+        log_plan->get_selectivity_ctx().init_op_ctx(temp_equal_sets, temp_rows);
+      }
+    }
+  }
+  return ret;
+}
+
+int ObAccessPathEstimation::get_skip_scan_prefix_exprs(ObIArray<ColumnItem> &column_items,
+                                                       int64_t skip_scan_offset,
+                                                       ObIArray<ObRawExpr*> &prefix_exprs)
+{
+  int ret = OB_SUCCESS;
+  prefix_exprs.reuse();
+  if (OB_UNLIKELY(skip_scan_offset < 0 || skip_scan_offset >= column_items.count())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get unexpected params",  K(ret), K(skip_scan_offset), K(column_items.count()));
+  } else {
+    for (int64_t i = 0; OB_SUCC(ret) && i < skip_scan_offset; ++i) {
+      if (OB_FAIL(prefix_exprs.push_back(column_items.at(i).expr_))) {
+        LOG_WARN("failed to push back",  K(ret), K(skip_scan_offset));
+      }
+    }
+  }
+  return ret;
+}
+
+int ObAccessPathEstimation::update_use_skip_scan(ObCostTableScanInfo &est_cost_info,
+                                                 ObIArray<ObExprSelPair> &all_predicate_sel,
+                                                 OptSkipScanState &use_skip_scan)
+{
+  int ret = OB_SUCCESS;
+  const ObTableMetaInfo *table_meta_info = NULL;
+  if (OB_ISNULL(table_meta_info = est_cost_info.table_meta_info_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null",  K(ret), K(table_meta_info));
+  } else {
+    // const static double NORMAL_CPU_TUPLE_COST = 0.02977945030613315927249275026;
+    // const static double NORMAL_TABLE_SCAN_CPU_TUPLE_COST = 0.3717749711890249146505031527;
+    // const static double NORMAL_MICRO_BLOCK_SEQ_COST = 4.12032943880540981;
+    // const static double NORMAL_MICRO_BLOCK_RND_COST = 5.45276187553;
+    const double row_count = table_meta_info->table_row_count_
+                             * est_cost_info.prefix_filter_sel_
+                             * est_cost_info.pushdown_prefix_filter_sel_;
+    const double row_count_per_range = std::max(row_count
+                                                * est_cost_info.ss_postfix_range_filters_sel_
+                                                / est_cost_info.ss_prefix_ndv_,
+                                                1.0);
+    const double ss_row_count = est_cost_info.ss_prefix_ndv_
+                                    + row_count_per_range * est_cost_info.ss_prefix_ndv_;
+    const double index_scan_cost = row_count * (NORMAL_CPU_TUPLE_COST + NORMAL_TABLE_SCAN_CPU_TUPLE_COST);
+    const double skip_scan_cost = ss_row_count * NORMAL_MICRO_BLOCK_RND_COST;
+    LOG_TRACE("decide use skip scan by ndv and selectively", K(use_skip_scan), K(row_count), K(row_count_per_range),
+                  K(ss_row_count), K(index_scan_cost), K(skip_scan_cost),
+                  K(est_cost_info.ss_prefix_ndv_), K(est_cost_info.ss_postfix_range_filters_sel_),
+                  K(est_cost_info.ss_postfix_range_filters_));
+    bool reset_skip_scan = false;
+    if (OptSkipScanState::SS_UNSET != use_skip_scan) {
+      /* do nothing */
+    } else if (!table_meta_info->has_opt_stat_ ||
+               OB_DEFAULT_STAT_EST == table_meta_info->cost_est_type_) {
+      reset_skip_scan = true;
+    } else if (est_cost_info.ss_prefix_ndv_ > 1000 || est_cost_info.ss_postfix_range_filters_sel_ > 0.01) {
+      reset_skip_scan = true;
+    } else if (skip_scan_cost < index_scan_cost) {
+      use_skip_scan = OptSkipScanState::SS_NDV_SEL_ENABLE;
+    } else {
+      reset_skip_scan = true;
+    }
+    if (OB_SUCC(ret) && reset_skip_scan) {
+      const bool is_full_scan = est_cost_info.ref_table_id_ == est_cost_info.index_id_;
+      ObIArray<ObRawExpr*> &filters = is_full_scan ? est_cost_info.table_filters_
+                                                   : est_cost_info.postfix_filters_;
+      double &filter_sel = is_full_scan ? est_cost_info.table_filter_sel_
+                                        : est_cost_info.postfix_filter_sel_;
+      if (OB_FAIL(append(filters, est_cost_info.ss_postfix_range_filters_))) {
+        LOG_WARN("failed to append exprs", K(ret));
+      } else if (OB_FAIL(ObOptSelectivity::calculate_selectivity(*est_cost_info.table_metas_,
+                                                                *est_cost_info.sel_ctx_,
+                                                                filters,
+                                                                filter_sel,
+                                                                all_predicate_sel))) {
+        LOG_WARN("failed to calculate selectivity", K(est_cost_info.postfix_filters_), K(ret));
+      } else {
+        est_cost_info.ss_ranges_.reuse();
+        est_cost_info.ss_postfix_range_filters_.reuse();
+        est_cost_info.ss_prefix_ndv_ = 1.0;
+        est_cost_info.ss_postfix_range_filters_sel_ = 1.0;
+        use_skip_scan = OptSkipScanState::SS_DISABLE;
+      }
+    }
   }
   return ret;
 }
@@ -625,6 +795,77 @@ int ObAccessPathEstimation::construct_scan_range_batch(ObIAllocator &allocator,
   return ret;
 }
 
+bool ObAccessPathEstimation::is_multi_geo_range(const ObNewRange &range)
+{
+  return OB_NOT_NULL(range.get_start_key().get_obj_ptr()) &&
+         range.get_start_key().get_obj_ptr()[0].get_uint64() != range.get_end_key().get_obj_ptr()[0].get_uint64();
+}
+
+
+int ObAccessPathEstimation::construct_geo_scan_range_batch(ObIAllocator &allocator,
+                                                           const ObIArray<ObNewRange> &scan_ranges,
+                                                           ObSimpleBatch &batch)
+{
+  int ret = OB_SUCCESS;
+  if (scan_ranges.empty()) {
+    batch.type_ = ObSimpleBatch::T_NONE;
+  } else if (scan_ranges.count() == 1) { //T_SCAN
+    void *ptr = allocator.alloc(sizeof(SQLScanRange));
+    if (OB_ISNULL(ptr)) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_WARN("fail to alloc memory", K(ptr), K(ret));
+    } else {
+      SQLScanRange *range = new(ptr)SQLScanRange();
+      *range = scan_ranges.at(0);
+      batch.type_ = ObSimpleBatch::T_SCAN;
+      batch.range_ = range;
+    }
+  } else { //T_MULTI_SCAN
+    SQLScanRangeArray *range_array = NULL;
+    void *ptr = NULL;
+    if (scan_ranges.at(0).get_start_key().get_obj_cnt() < SPATIAL_ROWKEY_MIN_NUM) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("The count of rowkey from spatial_index_table is wrong.", K(ret), K(scan_ranges.at(0).get_start_key().get_obj_cnt()));
+    } else if (OB_ISNULL(ptr = allocator.alloc(sizeof(SQLScanRangeArray)))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_WARN("fail to alloc memory", K(ptr), K(ret));
+    } else {
+      range_array = new(ptr)SQLScanRangeArray();
+      batch.type_ = ObSimpleBatch::T_MULTI_SCAN;
+      batch.ranges_ = range_array;
+      int64_t ranges_count = 0;
+      // push_back scan_range for first priority
+      for (int64_t i = 0; OB_SUCC(ret) && i < scan_ranges.count(); ++i) {
+        const ObNewRange &range = scan_ranges.at(i);
+        if (is_multi_geo_range(range)) {
+          if (OB_FAIL(range_array->push_back(range))) {
+            LOG_WARN("failed to push back scan range", K(ret));
+          } else {
+            ranges_count++;
+          }
+        }
+      }
+      // push_back get_range
+      for (int64_t i = 0;
+          OB_SUCC(ret)
+          && ranges_count < ObOptEstCost::MAX_STORAGE_RANGE_ESTIMATION_NUM
+          && i < scan_ranges.count();
+          ++i) {
+        const ObNewRange &range = scan_ranges.at(i);
+        if (!is_multi_geo_range(range)) {
+          if (OB_FAIL(range_array->push_back(range))) {
+            LOG_WARN("failed to push back scan range", K(ret));
+          } else {
+            ranges_count++;
+          }
+        }
+      }
+    }
+  }
+
+  return ret;
+}
+
 bool ObBatchEstTasks::check_result_reliable() const
 {
   bool bret = paths_.count() == res_.index_param_res_.count();
@@ -652,7 +893,7 @@ int ObAccessPathEstimation::estimate_full_table_rowcount(ObOptimizerContext &ctx
   ObArenaAllocator arena("CardEstimation");
   bool force_leader_estimation = false;
   
-  force_leader_estimation = OB_FAIL(E(EventTable::EN_LEADER_STORAGE_ESTIMATION) OB_SUCCESS);
+  force_leader_estimation = OB_FAIL(OB_E(EventTable::EN_LEADER_STORAGE_ESTIMATION) OB_SUCCESS);
   ret = OB_SUCCESS;
   
   HEAP_VAR(ObBatchEstTasks, task) {

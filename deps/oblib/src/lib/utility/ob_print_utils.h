@@ -43,6 +43,11 @@ int hex_to_cstr(const void *in_data,
                 const int64_t data_lenth,
                 char *buff,
                 const int64_t buff_size);
+int hex_to_cstr(const void *in_data,
+                const int64_t data_length,
+                char *buff,
+                const int64_t buff_size,
+                int64_t &pos);
 /**
  * convert the input buffer into hex string,  not include '\0'
  *
@@ -214,7 +219,7 @@ const char *to_cstring(const T &obj, const bool verbose)
   mgr->inc_level();
   CStringBufMgr::BufNode *node = mgr->acquire();
   if (OB_ISNULL(node)) {
-    LIB_LOG(ERROR, "buffer is NULL");
+    LIB_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "buffer is NULL");
   } else {
     buffer = node->buf_;
     if (NULL == &obj) {
@@ -242,7 +247,7 @@ const char *to_cstring(const T &obj, FalseType)
   mgr->inc_level();
   CStringBufMgr::BufNode *node = mgr->acquire();
   if (OB_ISNULL(node)) {
-    LIB_LOG(ERROR, "buffer is NULL");
+    LIB_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "buffer is NULL");
   } else {
     buffer = node->buf_;
     pos = to_string(obj, buffer, CStringBufMgr::BUF_SIZE -1);

@@ -524,9 +524,12 @@ int ObBinlogRecordPrinter::output_data_file_column_data(IBinlogRecord *br,
   const long col_data_length = col_meta ? col_meta->getLength(): 0;
   bool is_generated_column = col_meta ? col_meta->isGenerated() : false;
   bool is_hidden_row_key_column = col_meta ? col_meta->isHiddenRowKey() : false;
+  bool is_partition_column = col_meta ? col_meta->isPartitioned() : false;
+  bool is_generate_dep_column = col_meta ? col_meta->isDependent() : false;
   bool is_lob = is_lob_type(ctype);
   bool is_json = is_json_type(ctype);
   std::string enum_set_values_str;
+  bool is_geometry = is_geometry_type(ctype);
 
   int64_t column_index = index + 1;
   ROW_PRINTF(ptr, size, pos, ri, "[C%ld] column_name:%s", column_index, cname);
@@ -539,11 +542,17 @@ int ObBinlogRecordPrinter::output_data_file_column_data(IBinlogRecord *br,
     if (is_hidden_row_key_column) {
       ROW_PRINTF(ptr, size, pos, ri, "[C%ld] column_is_hidden_rowkey:%d", column_index, is_hidden_row_key_column);
     }
-    //  print the length of varchar only in print detail mode, 
+    if (is_partition_column) {
+      ROW_PRINTF(ptr, size, pos, ri, "[C%ld] column_is_partition_col:true", column_index);
+    }
+    if (is_generate_dep_column) {
+      ROW_PRINTF(ptr, size, pos, ri, "[C%ld] column_is_dep_col_of_gen_col:true", column_index);
+    }
+    //  print the length of varchar only in print detail mode,
     //  because there have been many test cases with varchar type before the varchar length info is added into column meta
     if (oceanbase::obmysql::MYSQL_TYPE_VAR_STRING == ctype || oceanbase::obmysql::MYSQL_TYPE_BIT == ctype) {
       ROW_PRINTF(ptr, size, pos, ri, "[C%ld] column_define_length:%ld", column_index, col_data_length);
-    } 
+    }
     else if ((oceanbase::obmysql::MYSQL_TYPE_ENUM == ctype) || (oceanbase::obmysql::MYSQL_TYPE_SET == ctype)) {
       const std::string delim = ",";
       for (int i = 0; i < values_of_enum_set->size(); i++) {
@@ -553,12 +562,11 @@ int ObBinlogRecordPrinter::output_data_file_column_data(IBinlogRecord *br,
         }
       }
       ROW_PRINTF(ptr, size, pos, ri, "[C%ld] column_extend_info:%s", column_index, enum_set_values_str.c_str());
-    } 
-    //  print precision & scale only in print detail mode, becacuse INT in oracle mode is also a kind of NUMBER(DECIMAL) 
-    //  whose precision is 38 and scale is 0, more importantly, the default precision(-1, PRECISION_UNKNOWN_YET) 
-    //  and scale(-85, ORA_NUMBER_SCALE_UNKNOWN_YET) of NUMBER in oracle mode is confusing, so we decide not to 
-    //  modify test results for oracle mode temporarily for convenience and efficiency.
-    //  TODO
+    }
+    // print precision & scale only in print detail mode, becacuse INT in oracle mode is also a kind of NUMBER(DECIMAL)
+    // whose precision is 38 and scale is 0
+    // the default value of precision is -1(PRECISION_UNKNOWN_YET) and the default value of scale is -85
+    // (ORA_NUMBER_SCALE_UNKNOWN_YET), when using default precision & scale, the number type would behave adaptively
     else if ((oceanbase::obmysql::MYSQL_TYPE_DECIMAL == ctype) || (oceanbase::obmysql::MYSQL_TYPE_NEWDECIMAL == ctype)) {
       // Not sure if MYSQL_TYPE_DECIMAL is deprecated, DECIMAL in mysql & oracle mode should be MYSQL_TYPE_NEWDECIMAL
       ROW_PRINTF(ptr, size, pos , ri, "[C%ld] column_precision:%ld", column_index, precision);
@@ -577,7 +585,7 @@ int ObBinlogRecordPrinter::output_data_file_column_data(IBinlogRecord *br,
       const char *new_col_value = new_cols[index].buf;
       size_t new_col_value_len = new_cols[index].buf_used_size;
 
-      if ((is_lob || is_json) && enable_print_lob_md5) {
+      if ((is_lob || is_json || is_geometry) && enable_print_lob_md5) {
         ROW_PRINTF(ptr, size, pos, ri, "[C%ld] column_value_new_md5:[%s](%ld)",
             column_index, calc_md5_cstr(new_col_value, new_col_value_len), new_col_value_len);
       } else {
@@ -608,7 +616,7 @@ int ObBinlogRecordPrinter::output_data_file_column_data(IBinlogRecord *br,
         if (OB_SUCCESS == ret && OB_FAIL(print_hex(old_col_value, old_col_value_len, ptr, size, pos))) {
           LOG_ERROR("print_hex fail", K(ret));
         }
-      } else if ((is_lob || is_json) && enable_print_lob_md5) {
+      } else if ((is_lob || is_json || is_geometry) && enable_print_lob_md5) {
         ROW_PRINTF(ptr, size, pos, ri, "[C%ld] column_value_old_md5:[%s](%ld)",
             column_index, calc_md5_cstr(old_col_value, old_col_value_len), old_col_value_len);
       } else {
@@ -754,7 +762,8 @@ bool ObBinlogRecordPrinter::need_print_hex(int ctype)
       || obmysql::MYSQL_TYPE_STRING == ctype
       || obmysql::MYSQL_TYPE_OB_NVARCHAR2 == ctype
       || obmysql::MYSQL_TYPE_OB_NCHAR == ctype
-      || obmysql::MYSQL_TYPE_JSON == ctype);
+      || obmysql::MYSQL_TYPE_JSON == ctype
+      || obmysql::MYSQL_TYPE_GEOMETRY == ctype);
 }
 
 int ObBinlogRecordPrinter::write_data_file(const int fd,

@@ -38,6 +38,7 @@ ObTabletPointer::ObTabletPointer()
     memtable_mgr_handle_(),
     ddl_info_(),
     tx_data_(),
+    redefined_schema_version_(OB_INVALID_VERSION),
     cond_(),
     msd_lock_(),
     ddl_kv_mgr_lock_()
@@ -52,6 +53,7 @@ ObTabletPointer::ObTabletPointer(
     memtable_mgr_handle_(memtable_mgr_handle),
     ddl_info_(),
     tx_data_(),
+    redefined_schema_version_(OB_INVALID_VERSION),
     cond_(),
     msd_lock_(ObLatchIds::TABLET_MULTI_SOURCE_DATA_LOCK),
     ddl_kv_mgr_lock_()
@@ -73,6 +75,7 @@ void ObTabletPointer::reset()
   memtable_mgr_handle_.reset();
   ddl_info_.reset();
   tx_data_.reset();
+  redefined_schema_version_ = OB_INVALID_VERSION;
   cond_.destroy();
 
   ObMetaPointer<ObTablet>::reset();
@@ -143,7 +146,7 @@ int ObTabletPointer::wash_obj()
   if (OB_FAIL(obj_.ptr_->inc_macro_disk_ref())) {
     LOG_WARN("fail to inc macro disk ref", K(ret), K(obj_));
   } else {
-    FLOG_INFO("succeed to wash one tablet", KP(obj_.ptr_), K(ls_id), K(tablet_id), K(wash_score));
+    FLOG_INFO("succeed to wash one tablet", KP(obj_.ptr_), K(ls_id), K(tablet_id), K(wash_score), K(phy_addr_));
     reset_obj();
   }
   return ret;
@@ -182,6 +185,7 @@ int ObTabletPointer::deep_copy(char *buf, const int64_t buf_len, ObMetaPointer<O
       pvalue->memtable_mgr_handle_ = memtable_mgr_handle_;
       pvalue->ddl_info_ = ddl_info_;
       pvalue->tx_data_ = tx_data_;
+      pvalue->redefined_schema_version_ = redefined_schema_version_;
       value = pvalue;
       // NOTICE: cond and rw lock cannot be copied
     } else {
@@ -204,6 +208,22 @@ int ObTabletPointer::get_tx_data(ObTabletTxMultiSourceDataUnit &tx_data) const
   int ret = OB_SUCCESS;
   TCRLockGuard guard(msd_lock_);
   tx_data = tx_data_;
+  return ret;
+}
+
+int ObTabletPointer::set_redefined_schema_version(const int64_t schema_version)
+{
+  int ret = OB_SUCCESS;
+  TCWLockGuard guard(msd_lock_);
+  redefined_schema_version_ = schema_version;
+  return ret;
+}
+
+int ObTabletPointer::get_redefined_schema_version(int64_t &schema_version) const
+{
+  int ret = OB_SUCCESS;
+  TCRLockGuard guard(msd_lock_);
+  schema_version = redefined_schema_version_;
   return ret;
 }
 
@@ -267,7 +287,7 @@ int ObTabletPointer::remove_ddl_kv_mgr(const ObDDLKvMgrHandle &ddl_kv_mgr_handle
     LOG_WARN("invalid argument", K(ret), K(ddl_kv_mgr_handle));
   } else if (ddl_kv_mgr_handle_.get_obj() != ddl_kv_mgr_handle.get_obj()) {
     ret = OB_ITEM_NOT_MATCH;
-    LOG_WARN("ddl kv mgr changed", K(ret));
+    LOG_WARN("ddl kv mgr changed", K(ret), KP(ddl_kv_mgr_handle_.get_obj()), KPC(ddl_kv_mgr_handle.get_obj()));
   } else {
     ddl_kv_mgr_handle_.reset();
   }

@@ -25,7 +25,7 @@ ObCond::ObCond(const int64_t spin_wait_num) : spin_wait_num_(spin_wait_num),
 {
   pthread_mutex_init(&mutex_, NULL);
   if (0 != pthread_cond_init(&cond_, NULL)) {
-    _OB_LOG(ERROR, "pthread_cond_init failed");
+    _OB_LOG_RET(ERROR, common::OB_ERR_SYS, "pthread_cond_init failed");
   }
 }
 
@@ -113,7 +113,7 @@ int ObCond::timedwait(const int64_t time_us)
 
 S2MQueueThread::S2MQueueThread() : thread_num_(0),
                                    thread_conf_iter_(0),
-                                   thread_conf_lock_(),
+                                   thread_conf_lock_(ObLatchIds::DEFAULT_DRW_LOCK),
                                    queued_num_(),
                                    queue_rebalance_(false)
 {
@@ -423,7 +423,7 @@ void *S2MQueueThread::thread_func_(void *data)
   ThreadConf *const tc = (ThreadConf *)data;
   if (NULL == tc
       || NULL == tc->host) {
-    _OB_LOG(WARN, "thread_func param null pointer");
+    _OB_LOG_RET(WARN, common::OB_INVALID_ARGUMENT, "thread_func param null pointer");
   } else {
     tc->host->thread_index() = tc->index;
     void *pdata = tc->host->on_begin();
@@ -611,7 +611,7 @@ void *M2SQueueThread::thread_func_(void *data)
 {
   M2SQueueThread *const host = (M2SQueueThread *)data;
   if (NULL == host) {
-    _OB_LOG(WARN, "thread_func param null pointer");
+    _OB_LOG_RET(WARN, common::OB_INVALID_ARGUMENT, "thread_func param null pointer");
   } else {
     void *pdata = host->on_begin();
     while (host->run_flag_)

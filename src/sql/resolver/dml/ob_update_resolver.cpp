@@ -69,6 +69,13 @@ int ObUpdateResolver::resolve(const ParseNode &parse_tree)
     }
   }
 
+  // resolve with clause before resolve table items
+  if (OB_SUCC(ret) && is_mysql_mode()) {
+    if (OB_FAIL(resolve_with_clause(parse_tree.children_[WITH_MYSQL]))) {
+      LOG_WARN("resolve outline data hints failed", K(ret));
+    }
+  }
+
   // 1. resolve table items
   if (OB_SUCC(ret)) {
     ParseNode *table_node = parse_tree.children_[TABLE];
@@ -206,9 +213,20 @@ int ObUpdateResolver::try_expand_returning_exprs()
       LOG_WARN("get unexpected table info count", K(ret));
     } else {
       ObIArray<ObAssignment> &assignments = tables_info.at(0)->assignments_;
-      FOREACH_CNT_X(e, update_stmt->get_returning_exprs(), OB_SUCC(ret))
-      {
-        OZ(ObTableAssignment::expand_expr(assignments, *e));
+      ObRawExprCopier copier(*params_.expr_factory_);
+      for (int64_t i = 0; OB_SUCC(ret) && i < assignments.count(); ++i) {
+        if (OB_FAIL(copier.add_replaced_expr(assignments.at(i).column_expr_,
+                                             assignments.at(i).expr_))) {
+          LOG_WARN("failed to add replaced expr", K(ret));
+        }
+      }
+      if (OB_SUCC(ret)) {
+        if (OB_FAIL(copier.add_skipped_expr(update_stmt->get_returning_aggr_items(), false))) {
+          LOG_WARN("failed to add uncopy exprs", K(ret));
+        } else if (OB_FAIL(copier.copy_on_replace(update_stmt->get_returning_exprs(),
+                                                  update_stmt->get_returning_exprs()))) {
+          LOG_WARN("failed to copy on repalce returning exprs", K(ret));
+        }
       }
     }
   }
@@ -450,6 +468,21 @@ int ObUpdateResolver::resolve_table_list(const ParseNode &parse_tree)
        */
         LOG_DEBUG("succ to add from item", KPC(table_item));
       }
+    }
+  }
+  if (OB_SUCC(ret) && is_mysql_mode() && 1 == update_stmt->get_from_item_size()) {
+    const TableItem *table_item = update_stmt->get_table_item(update_stmt->get_from_item(0));
+    if (OB_ISNULL(table_item)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected null", K(ret));
+    } else if (table_item->cte_type_ != TableItem::NOT_CTE) {
+      ret = OB_ERR_NON_UPDATABLE_TABLE;
+      const ObString &table_name = table_item->alias_name_.empty() ? table_item->table_name_ : table_item->alias_name_;
+      ObString scope_name = "UPDATE";
+      LOG_USER_ERROR(OB_ERR_NON_UPDATABLE_TABLE,
+                      table_name.length(), table_name.ptr(),
+                      scope_name.length(), scope_name.ptr());
+      LOG_WARN("table is not updatable", K(ret));
     }
   }
   return ret;
@@ -696,10 +729,18 @@ int ObUpdateResolver::generate_batched_stmt_info()
         for (int64_t j = 0; OB_SUCC(ret) && j < assignments.count(); ++j) {
           ObAssignment &assignment = assignments.at(j);
           ObRawExpr *column_expr = assignment.column_expr_;
+          bool contain_case_when = false;
           if (has_exist_in_array(predicate_columns, column_expr)) {
             assignment.is_predicate_column_ = true;
+          } else if (OB_FAIL(ObRawExprUtils::check_contain_case_when_exprs(assignment.expr_,
+                                                                           contain_case_when))) {
+            LOG_WARN("fail to check contain case when", K(ret), K(assignment));
+          } else if (contain_case_when) {
+            ret = OB_BATCHED_MULTI_STMT_ROLLBACK;
+            LOG_TRACE("batched multi stmt contain case when expr", K(ret));
           }
         }
+
       }
     }
   }
@@ -724,7 +765,7 @@ int ObUpdateResolver::resolve_update_constraints()
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("get unexpected null", K(table_item), K(ret));
       } else if (!update_stmt->has_instead_of_trigger() &&
-                 OB_FAIL(resolve_view_check_exprs(table_item, false, table_info->view_check_exprs_))) {
+                 OB_FAIL(resolve_view_check_exprs(table_item->table_id_, table_item, false, table_info->view_check_exprs_))) {
         LOG_WARN("failed to resolve view check exprs", K(ret));
       } else if (OB_FAIL(resolve_check_constraints(table_item, table_info->check_constraint_exprs_))) {
         LOG_WARN("failed to resolve view check exprs", K(ret));
@@ -734,7 +775,8 @@ int ObUpdateResolver::resolve_update_constraints()
       } else {
         // TODO @yibo remove view check exprs in log_del_upd
         for (uint64_t j = 0; OB_SUCC(ret) && j < table_info->view_check_exprs_.count(); ++j) {
-          if (OB_FAIL(ObTableAssignment::expand_expr(table_info->assignments_,
+          if (OB_FAIL(ObTableAssignment::expand_expr(*params_.expr_factory_,
+                                                     table_info->assignments_,
                                                      table_info->view_check_exprs_.at(j)))) {
             LOG_WARN("expand generated column expr failed", K(ret));
           }

@@ -185,14 +185,7 @@ int ObPxSqcAsyncProxy::wait_all() {
         if (phy_plan_ctx_->get_timeout_timestamp() -
           ObTimeUtility::current_time() > 0) {
           error_index_ = idx;
-          bool init_sqc_not_send_out = (callback.get_error() == EASY_TIMEOUT_NOT_SENT_OUT
-              || callback.get_error() == EASY_DISCONNECT_NOT_SENT_OUT);
-          if (init_sqc_not_send_out) {
-            // only if it's sure init_sqc msg is not sent to sqc successfully, return OB_RPC_CONNECT_ERROR to retry.
-            ret = OB_RPC_CONNECT_ERROR;
-          } else {
-            ret = OB_PACKET_STATUS_UNKNOWN;
-          }
+          ret = OB_RPC_CONNECT_ERROR;
         } else {
           ret = OB_TIMEOUT;
         }
@@ -256,7 +249,7 @@ void ObPxSqcAsyncProxy::destroy() {
 }
 
 void ObPxSqcAsyncProxy::fail_process() {
-  LOG_WARN(
+  LOG_WARN_RET(OB_SUCCESS,
       "async sqc fails, process the callbacks that have not yet got results",
       K(return_cb_count_), K(callbacks_.count()));
   while (return_cb_count_ < callbacks_.count()) {
@@ -274,7 +267,7 @@ void ObPxSqcAsyncProxy::fail_process() {
     }
     cond_.wait_us(500);
   }
-  LOG_WARN("async sqc fails, all callbacks have been processed");
+  LOG_WARN_RET(OB_SUCCESS, "async sqc fails, all callbacks have been processed");
 }
 
 } // namespace sql

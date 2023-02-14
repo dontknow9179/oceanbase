@@ -29,6 +29,7 @@ ObAllVirtualMinorFreezeInfo::ObAllVirtualMinorFreezeInfo()
     addr_(),
     ls_id_(share::ObLSID::INVALID_LS_ID),
     ls_iter_guard_(),
+    diagnose_info_(),
     memtables_info_()
 {
 }
@@ -44,6 +45,7 @@ void ObAllVirtualMinorFreezeInfo::reset()
   addr_.reset();
   ls_id_ = share::ObLSID::INVALID_LS_ID;
   ls_iter_guard_.reset();
+  diagnose_info_.reset();
   memtables_info_.reset();
   memset(ip_buf_, 0, common::OB_IP_STR_BUFF);
   memset(memtables_info_string_, 0, OB_MAX_CHAR_LENGTH);
@@ -54,6 +56,7 @@ void ObAllVirtualMinorFreezeInfo::release_last_tenant()
 {
   ls_id_ = share::ObLSID::INVALID_LS_ID;
   ls_iter_guard_.reset();
+  diagnose_info_.reset();
   memtables_info_.reset();
   memset(memtables_info_string_, 0, OB_MAX_CHAR_LENGTH);
 }
@@ -105,6 +108,7 @@ int ObAllVirtualMinorFreezeInfo::process_curr_tenant(ObNewRow *&row)
   int ret = OB_SUCCESS;
   ObLS *ls = nullptr;
   ObFreezer *freezer = nullptr;
+  ObFreezerStat freeze_stat;
   if (NULL == allocator_) {
     ret = OB_NOT_INIT;
     SERVER_LOG(WARN, "allocator_ shouldn't be NULL", K(allocator_), K(ret));
@@ -119,8 +123,10 @@ int ObAllVirtualMinorFreezeInfo::process_curr_tenant(ObNewRow *&row)
     ret = OB_ERR_UNEXPECTED;
     SERVER_LOG(WARN, "ls shouldn't NULL here", K(ret));
   } else if (FALSE_IT(freezer = ls->get_freezer())) {
-  } else if (freezer->get_stat().is_valid()) {
-    ObFreezerStat& freeze_stat = freezer->get_stat();
+  } else if (!(freezer->get_stat().is_valid())) {
+  } else if (OB_FAIL(freezer->get_stat().deep_copy_to(freeze_stat))) {
+    SERVER_LOG(WARN, "fail to deep copy", K(ret));
+  } else {
     int64_t freeze_clock = 0;
     const int64_t col_count = output_column_ids_.count();
     for (int64_t i = 0; OB_SUCC(ret) && i < col_count; ++i) {
@@ -150,37 +156,37 @@ int ObAllVirtualMinorFreezeInfo::process_curr_tenant(ObNewRow *&row)
           break;
         case OB_APP_MIN_COLUMN_ID + 4:
           // tablet_id
-          cur_row_.cells_[i].set_int(freeze_stat.tablet_id_.id());
+          cur_row_.cells_[i].set_int(freeze_stat.get_tablet_id().id());
           break;
         case OB_APP_MIN_COLUMN_ID + 5:
           // is_force
-          cur_row_.cells_[i].set_varchar(freeze_stat.is_force_ ? "YES" : "NO");
+          cur_row_.cells_[i].set_varchar(freeze_stat.get_is_force() ? "YES" : "NO");
           cur_row_.cells_[i].set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
           break;
         case OB_APP_MIN_COLUMN_ID + 6:
           // freeze_clock
-          freeze_clock = freezer->get_freeze_clock();
+          freeze_clock = freeze_stat.get_freeze_clock();
           cur_row_.cells_[i].set_int(freeze_clock);
           break;
         case OB_APP_MIN_COLUMN_ID + 7:
           // freeze_snapshot_version
-          cur_row_.cells_[i].set_int(freezer->get_freeze_snapshot_version());
+          cur_row_.cells_[i].set_int(freeze_stat.get_freeze_snapshot_version().get_val_for_inner_table_field());
           break;
         case OB_APP_MIN_COLUMN_ID + 8:
           // start_time
-          cur_row_.cells_[i].set_timestamp(freeze_stat.start_time_);
+          cur_row_.cells_[i].set_timestamp(freeze_stat.get_start_time());
           break;
         case OB_APP_MIN_COLUMN_ID + 9:
           // end_time
-          cur_row_.cells_[i].set_timestamp(freeze_stat.end_time_);
+          cur_row_.cells_[i].set_timestamp(freeze_stat.get_end_time());
           break;
         case OB_APP_MIN_COLUMN_ID + 10:
           // ret_code
-          cur_row_.cells_[i].set_int(freeze_stat.ret_code_);
+          cur_row_.cells_[i].set_int(freeze_stat.get_ret_code());
           break;
         case OB_APP_MIN_COLUMN_ID + 11:
           // state
-          switch (freeze_stat.state_) {
+          switch (freeze_stat.get_state()) {
             case ObFreezeState::INVALID:
               cur_row_.cells_[i].set_varchar("INVALID");
               break;
@@ -205,8 +211,10 @@ int ObAllVirtualMinorFreezeInfo::process_curr_tenant(ObNewRow *&row)
           break;
         case OB_APP_MIN_COLUMN_ID + 12:
           // diagnose_info
-          cur_row_.cells_[i].set_varchar(freeze_stat.diagnose_info_.get_ob_string());
-          cur_row_.cells_[i].set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
+          if (OB_SUCC(freeze_stat.get_diagnose_info(diagnose_info_))) {
+            cur_row_.cells_[i].set_varchar(diagnose_info_.get_ob_string());
+            cur_row_.cells_[i].set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
+          }
           break;
         case OB_APP_MIN_COLUMN_ID + 13:
           // memtables_info
@@ -242,12 +250,12 @@ int ObAllVirtualMinorFreezeInfo::generate_memtables_info()
       // tablet_id
       strcat(memtables_info_string_, "tablet_id:");
       strcat(memtables_info_string_, to_cstring(memtables_info_[i].tablet_id_.id()));
-      // start_log_ts
-      strcat(memtables_info_string_, ", start_log_ts:");
-      strcat(memtables_info_string_, to_cstring(memtables_info_[i].start_log_ts_));
-      // end_log_ts
-      strcat(memtables_info_string_, ", end_log_ts:");
-      strcat(memtables_info_string_, to_cstring(memtables_info_[i].end_log_ts_));
+      // start_scn
+      strcat(memtables_info_string_, ", start_scn:");
+      strcat(memtables_info_string_, to_cstring(memtables_info_[i].start_scn_));
+      // end_scn
+      strcat(memtables_info_string_, ", end_scn:");
+      strcat(memtables_info_string_, to_cstring(memtables_info_[i].end_scn_));
       // write_ref_cnt
       strcat(memtables_info_string_, ", write_ref_cnt:");
       strcat(memtables_info_string_, to_cstring(memtables_info_[i].write_ref_cnt_));
@@ -255,7 +263,7 @@ int ObAllVirtualMinorFreezeInfo::generate_memtables_info()
       strcat(memtables_info_string_, ", unsubmitted_cnt:");
       strcat(memtables_info_string_, to_cstring(memtables_info_[i].unsubmitted_cnt_));
       // unsynced_cnt
-      strcat(memtables_info_string_, ", unsubmitted_cnt:");
+      strcat(memtables_info_string_, ", unsynced_cnt:");
       strcat(memtables_info_string_, to_cstring(memtables_info_[i].unsynced_cnt_));
       // current_right_boundary
       strcat(memtables_info_string_, ", current_right_boundary:");

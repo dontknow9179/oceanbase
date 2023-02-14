@@ -181,7 +181,7 @@ int ObTimeZoneInfoManager::fetch_time_zone_info()
       }
     }
   }
-  
+
   return ret;
 }
 

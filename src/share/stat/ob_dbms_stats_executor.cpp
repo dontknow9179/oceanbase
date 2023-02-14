@@ -58,12 +58,10 @@ int ObDbmsStatsExecutor::gather_table_stats(ObExecContext &ctx,
       /*do nothing*/
     } else if (OB_FAIL(do_gather_stats(ctx, param, extra, approx_opt_part_stats, opt_stats))) {
       LOG_WARN("failed to gather subpartition stats", K(ret));
-    } else if (OB_FAIL(buffer_opt_stat(ctx,
-                                       param.column_params_,
-                                       all_tstats,
-                                       all_cstats,
-                                       opt_stats))) {
-      LOG_WARN("failed to buffer opt stat", K(ret));
+    } else if (OB_FAIL(ObDbmsStatsUtils::calssify_opt_stat(opt_stats,
+                                                           all_tstats,
+                                                           all_cstats))) {
+      LOG_WARN("failed to calssify opt stat", K(ret));
     }
   }
   if (OB_SUCC(ret) && param.need_part_) {
@@ -74,12 +72,10 @@ int ObDbmsStatsExecutor::gather_table_stats(ObExecContext &ctx,
       /*do nothing*/
     } else if (OB_FAIL(do_gather_stats(ctx, param, extra, approx_opt_part_stats, opt_stats))) {
       LOG_WARN("failed to gather partition stats", K(ret));
-    } else if (OB_FAIL(buffer_opt_stat(ctx,
-                                       param.column_params_,
-                                       all_tstats,
-                                       all_cstats,
-                                       opt_stats))) {
-      LOG_WARN("failed to buffer opt stat", K(ret));
+    } else if (OB_FAIL(ObDbmsStatsUtils::calssify_opt_stat(opt_stats,
+                                                           all_tstats,
+                                                           all_cstats))) {
+      LOG_WARN("failed to calssify opt stat", K(ret));
     }
   }
   if (OB_SUCC(ret) && (param.need_global_ ||
@@ -89,25 +85,25 @@ int ObDbmsStatsExecutor::gather_table_stats(ObExecContext &ctx,
     ObSEArray<ObOptStat, 4> opt_stats;
     if (OB_FAIL(do_gather_stats(ctx, param, extra, approx_opt_part_stats, opt_stats))) {
       LOG_WARN("failed to gather table stats", K(ret));
-    } else if (OB_FAIL(buffer_opt_stat(ctx,
-                                       param.column_params_,
-                                       all_tstats,
-                                       all_cstats,
-                                       opt_stats))) {
-      LOG_WARN("failed to buffer opt stat", K(ret));
+    } else if (OB_FAIL(ObDbmsStatsUtils::calssify_opt_stat(opt_stats,
+                                                           all_tstats,
+                                                           all_cstats))) {
+      LOG_WARN("failed to calssify opt stat", K(ret));
     }
   }
   if (OB_SUCC(ret)) {
     ObSEArray<ObOptTableStatHandle, 4> history_tab_handles;
     ObSEArray<ObOptColumnStatHandle, 4> history_col_handles;
     //before write, we need record history stats.
-    if (OB_FAIL(ObDbmsStatsHistoryManager::get_history_stat_handles(ctx, param,
+    if (!param.is_temp_table_ &&
+        OB_FAIL(ObDbmsStatsHistoryManager::get_history_stat_handles(ctx, param,
                                                                     history_tab_handles,
                                                                     history_col_handles))) {
       LOG_WARN("failed to get history stat handles", K(ret));
     } else if (OB_FAIL(ObDbmsStatsUtils::split_batch_write(ctx, all_tstats, all_cstats))) {
       LOG_WARN("failed to split batch write", K(ret));
-    } else if (OB_FAIL(ObDbmsStatsUtils::batch_write_history_stats(ctx,
+    } else if (!param.is_temp_table_ &&
+               OB_FAIL(ObDbmsStatsUtils::batch_write_history_stats(ctx,
                                                                    history_tab_handles,
                                                                    history_col_handles))) {
       LOG_WARN("failed to batch write history stats", K(ret));
@@ -245,7 +241,8 @@ int ObDbmsStatsExecutor::set_table_stats(ObExecContext &ctx,
     if (OB_FAIL(do_set_table_stats(param, &table_stat))) {
       LOG_WARN("failed to do set table stats", K(ret));
     ////before update, we need record history stats.
-    } else if (OB_FAIL(ObDbmsStatsHistoryManager::get_history_stat_handles(ctx, param.table_param_,
+    } else if (!param.table_param_.is_temp_table_ &&
+               OB_FAIL(ObDbmsStatsHistoryManager::get_history_stat_handles(ctx, param.table_param_,
                                                                            history_tab_handles,
                                                                            history_col_handles))) {
       LOG_WARN("failed to get history stat handles", K(ret));
@@ -478,7 +475,8 @@ int ObDbmsStatsExecutor::delete_table_stats(ObExecContext &ctx,
     ObSEArray<ObOptColumnStatHandle, 4> history_col_handles;
     int64_t affected_rows = 0;
     //before delete, we need record history stats.
-    if (OB_FAIL(ObDbmsStatsHistoryManager::get_history_stat_handles(ctx, param,
+    if (!param.is_temp_table_ &&
+        OB_FAIL(ObDbmsStatsHistoryManager::get_history_stat_handles(ctx, param,
                                                                     history_tab_handles,
                                                                     history_col_handles))) {
       LOG_WARN("failed to get history stat handles", K(ret));
@@ -488,7 +486,7 @@ int ObDbmsStatsExecutor::delete_table_stats(ObExecContext &ctx,
                                                                           cascade_columns,
                                                                           affected_rows))) {
       LOG_WARN("failed to delete table stats", K(ret));
-    } else if (affected_rows != 0 &&
+    } else if (affected_rows != 0 && !param.is_temp_table_ &&
                OB_FAIL(ObDbmsStatsUtils::batch_write_history_stats(ctx,
                                                                    history_tab_handles,
                                                                    history_col_handles))) {
@@ -648,31 +646,6 @@ int ObDbmsStatsExecutor::init_opt_stat(ObIAllocator &allocator,
   return ret;
 }
 
-
-int ObDbmsStatsExecutor::buffer_opt_stat(ObExecContext &ctx,
-                                         const ObIArray<ObColumnStatParam> &column_params,
-                                         ObIArray<ObOptTableStat*> &table_stats,
-                                         ObIArray<ObOptColumnStat*> &column_stats,
-                                         ObIArray<ObOptStat> &opt_stats)
-{
-  int ret = OB_SUCCESS;
-  for (int64_t i = 0; OB_SUCC(ret) && i < opt_stats.count(); ++i) {
-    if (OB_FAIL(table_stats.push_back(opt_stats.at(i).table_stat_))) {
-      LOG_WARN("failed to push back table stat", K(ret));
-    } else {
-      for (int64_t j = 0; OB_SUCC(ret) && j < opt_stats.at(i).column_stats_.count(); ++j) {
-        if (OB_ISNULL(opt_stats.at(i).column_stats_.at(j))) {
-          ret = OB_ERR_UNEXPECTED;
-          LOG_WARN("get unexpected null", K(ret), K(opt_stats.at(i).column_stats_.at(j)));
-        } else if (opt_stats.at(i).column_stats_.at(j)->is_valid()) {
-          ret = column_stats.push_back(opt_stats.at(i).column_stats_.at(j));
-        }
-      }
-    }
-  }
-  return ret;
-}
-
 ObOptStat::~ObOptStat()
 {
   if (NULL != table_stat_) {
@@ -797,6 +770,68 @@ int ObDbmsStatsExecutor::do_gather_index_stats(ObExecContext &ctx,
       } else {/*do nothing*/}
     }
   }
+  return ret;
+}
+
+int ObDbmsStatsExecutor::update_stat_online(ObExecContext &ctx,
+                                            ObTableStatParam &param,
+                                            share::schema::ObSchemaGetterGuard *schema_guard,
+                                            TabStatIndMap &online_table_stats,
+                                            ColStatIndMap &online_column_stats)
+{
+  int ret = OB_SUCCESS;
+
+  int64_t affected_rows = 0;
+
+  //before write, we need record history stats.
+  ObSEArray<ObOptTableStatHandle, 4> history_tab_handles;
+  ObSEArray<ObOptColumnStatHandle, 4> history_col_handles;
+  ObSEArray<ObOptTableStat *, 4>  table_stats;
+  ObSEArray<ObOptColumnStat *, 4> column_stats;
+  ObSEArray<int64_t, 4> part_ids;
+  if (OB_FAIL(ObDbmsStatsLockUnlock::check_stat_locked(ctx, param))) {
+    if (ret == OB_ERR_DBMS_STATS_PL) {
+      param.need_global_ = false;
+      param.need_approx_global_ = false;
+      param.need_part_ = false;
+      param.need_subpart_ = false;
+      ret = OB_SUCCESS; // ignore lock check error
+    }
+    LOG_WARN("fail to check lock stat", K(ret));
+  }
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(ObDbmsStatsUtils::get_part_ids_from_param(param, part_ids))) {
+    //part id should generated after check stat locked, since check_stat_locked will change part_info
+    LOG_WARN("fail to get part_ids");
+  } else if (OB_FAIL(ObDbmsStatsHistoryManager::get_history_stat_handles(ctx,
+                                                                         param,
+                                                                         history_tab_handles,
+                                                                         history_col_handles))) {
+    LOG_WARN("failed to get history stat handles", K(ret));
+  } else if (OB_FAIL(ObDbmsStatsUtils::merge_tab_stats(param,
+                                                       online_table_stats,
+                                                       history_tab_handles,
+                                                       table_stats))) {
+    LOG_WARN("fail to merge tab stats", K(ret), K(history_tab_handles));
+  } else if (OB_FAIL(ObDbmsStatsUtils::merge_col_stats(param,
+                                                       online_column_stats,
+                                                       history_col_handles,
+                                                       column_stats))) {
+    LOG_WARN("fail to merge col stats", K(ret), K(history_col_handles));
+  } else if (OB_FAIL(ObDbmsStatsUtils::split_batch_write(ctx, table_stats, column_stats,
+                                                         false, false, true))) {
+    LOG_WARN("fail to update stat", K(ret), K(table_stats), K(column_stats));
+  } else if (OB_FAIL(ObDbmsStatsUtils::batch_write_history_stats(ctx,
+                                                                 history_tab_handles,
+                                                                 history_col_handles))) {
+    LOG_WARN("failed to batch write history stats", K(ret));
+  } else if (OB_FAIL(ObBasicStatsEstimator::update_last_modified_count(ctx, param))) {
+    //update history
+    LOG_WARN("failed to update last modified count", K(ret));
+  } else {
+    // should reuse stats out-side this function.
+  }
+
   return ret;
 }
 

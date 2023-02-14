@@ -62,8 +62,10 @@ int ObPlXaStartExecutor::execute(ObExecContext &ctx, ObXaStartStmt &stmt)
                              stmt.get_format_id()))) {
     LOG_WARN("set xid error", K(ret), K(stmt));
   } else if (my_session->get_in_transaction()) {
+    ObTxDesc *&tx_desc = my_session->get_tx_desc();
     ret = OB_TRANS_XA_OUTSIDE;
-    LOG_WARN("already start trans", K(ret), K(stmt.get_xa_string()));
+    LOG_WARN("already start trans", K(ret), K(xid), K(tx_desc->tid()),
+        K(tx_desc->get_xid()));
   } else if (OB_FAIL(get_org_cluster_id_(my_session, org_cluster_id))) {
   } else if (OB_FAIL(my_session->get_tx_timeout(tx_timeout))) {
     LOG_ERROR("fail to get trans timeout ts", K(ret));
@@ -94,14 +96,12 @@ int ObPlXaStartExecutor::execute(ObExecContext &ctx, ObXaStartStmt &stmt)
                                                          tx_param,
                                                          tx_desc))) {
       LOG_WARN("xa start failed", K(ret), K(tx_param));
-      my_session->reset_first_need_txn_stmt_type();
       my_session->reset_tx_variable();
       my_session->set_early_lock_release(false);
       ctx.set_need_disconnect(false);
     } else {
       // associate xa with session
       my_session->associate_xa(xid);
-      my_session->set_explicit_start_trans(true);
     }
   }
   LOG_INFO("xa start execute", K(stmt));
@@ -159,9 +159,7 @@ int ObXaEndExecutor::execute(ObExecContext &ctx, ObXaEndStmt &stmt)
       LOG_WARN("explicit end trans failed", K(ret));
     }
   } else {
-    my_session->reset_first_need_txn_stmt_type();
     my_session->reset_tx_variable();
-    my_session->set_early_lock_release(false);
     ctx.set_need_disconnect(false);
     my_session->get_trans_desc().get_standalone_stmt_desc().reset();
   }
@@ -204,9 +202,7 @@ int ObPlXaEndExecutor::execute(ObExecContext &ctx, ObXaEndStmt &stmt)
       //   LOG_WARN("explicit end trans failed", K(ret));
       // }
     } else {
-      my_session->reset_first_need_txn_stmt_type();
       my_session->reset_tx_variable();
-      my_session->set_early_lock_release(false);
       my_session->disassociate_xa();
       ctx.set_need_disconnect(false);
     }
@@ -375,9 +371,7 @@ int ObPlXaEndTransExecutor::execute_(const ObString &gtrid_str,
   //   } else {
   //     LOG_DEBUG("succeed to execute xa commit/rollback", K(xid), K(is_rollback));
   //   }
-  //   my_session->reset_first_need_txn_stmt_type();
   //   my_session->reset_tx_variable();
-  //   my_session->set_early_lock_release(false);
   //   ctx.set_need_disconnect(false);
   // }
   // LOG_DEBUG("xa end_trans execute", K(gtrid_str), K(bqual_str), K(format_id), K(is_rollback),

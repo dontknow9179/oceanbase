@@ -117,11 +117,15 @@ public:
         tenant_id_(common::OB_SYS_TENANT_ID), group_id_(0),
         priv_tenant_id_(common::OB_INVALID_TENANT_ID),
         max_process_handler_time_(0), compressor_type_(common::INVALID_COMPRESSOR),
+        src_cluster_id_(common::OB_INVALID_CLUSTER_ID),
         dst_cluster_id_(common::OB_INVALID_CLUSTER_ID), init_(false),
         active_(true), is_trace_time_(false), do_ratelimit_(false), is_bg_flow_(0), rcode_() {}
   virtual ~ObRpcProxy() = default;
 
   int init(const rpc::frame::ObReqTransport *transport,
+           const common::ObAddr &dst = common::ObAddr());
+  int init(const rpc::frame::ObReqTransport *transport,
+           const int64_t src_cluster_id,
            const common::ObAddr &dst = common::ObAddr());
   void destroy()                                { init_ = false; }
   bool is_inited() const                        { return init_; }
@@ -143,12 +147,17 @@ public:
   void set_transport_impl(int transport_impl) { transport_impl_ = transport_impl; }
 
   bool need_increment_request_level(int pcode) const {
-    return (pcode > OB_SQL_PCODE_START && pcode < OB_SQL_PCODE_END)
-          || pcode == OB_OUT_TRANS_LOCK_TABLE || pcode == OB_OUT_TRANS_UNLOCK_TABLE || pcode == OB_TABLE_LOCK_TASK
-          || pcode == OB_HIGH_PRIORITY_TABLE_LOCK_TASK || pcode == OB_REGISTER_TX_DATA
-          || pcode == OB_REFRESH_SYNC_VALUE || pcode == OB_CLEAR_AUTOINC_CACHE || pcode == OB_CLEAN_SEQUENCE_CACHE || pcode == OB_FETCH_TABLET_AUTOINC_SEQ_CACHE
-          || pcode == OB_BATCH_GET_TABLET_AUTOINC_SEQ || pcode == OB_BATCH_SET_TABLET_AUTOINC_SEQ
-          || pcode == OB_CALC_COLUMN_CHECKSUM_REQUEST || pcode == OB_REMOTE_WRITE_DDL_REDO_LOG || pcode == OB_REMOTE_WRITE_DDL_COMMIT_LOG;
+    return ((pcode > OB_SQL_PCODE_START && pcode < OB_SQL_PCODE_END)
+            || pcode == OB_OUT_TRANS_LOCK_TABLE || pcode == OB_OUT_TRANS_UNLOCK_TABLE
+            || pcode == OB_TABLE_LOCK_TASK
+            || pcode == OB_HIGH_PRIORITY_TABLE_LOCK_TASK || pcode == OB_BATCH_TABLE_LOCK_TASK
+            || pcode == OB_HIGH_PRIORITY_BATCH_TABLE_LOCK_TASK
+            || pcode == OB_REGISTER_TX_DATA
+            || pcode == OB_REFRESH_SYNC_VALUE || pcode == OB_CLEAR_AUTOINC_CACHE
+            || pcode == OB_CLEAN_SEQUENCE_CACHE || pcode == OB_FETCH_TABLET_AUTOINC_SEQ_CACHE
+            || pcode == OB_BATCH_GET_TABLET_AUTOINC_SEQ || pcode == OB_BATCH_SET_TABLET_AUTOINC_SEQ
+            || pcode == OB_CALC_COLUMN_CHECKSUM_REQUEST || pcode == OB_REMOTE_WRITE_DDL_REDO_LOG
+            || pcode == OB_REMOTE_WRITE_DDL_COMMIT_LOG);
   }
 
   // when active is set as false, all RPC calls will simply return OB_INACTIVE_RPC_PROXY.
@@ -248,6 +257,7 @@ protected:
   uint64_t priv_tenant_id_;
   uint32_t max_process_handler_time_;
   common::ObCompressorType compressor_type_;
+  int64_t src_cluster_id_;
   int64_t dst_cluster_id_;
   bool init_;
   bool active_;
@@ -365,7 +375,7 @@ extern ObRpcProxy::NoneT None;
   }                                                                     \
   inline CLS& group_id(uint64_t group_id)                                    \
   {                                                                     \
-    set_group_id(group_id);                                              \
+    set_group_id(static_cast<int32_t>(group_id));                       \
     return *this;                                                       \
   }                                                                     \
   inline CLS& as(uint64_t tenant_id)                                    \

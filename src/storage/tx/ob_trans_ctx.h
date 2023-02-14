@@ -148,7 +148,6 @@ public:
   uint32_t get_session_id() const { return session_id_; }
   void before_unlock(CtxLockArg &arg);
   void after_unlock(CtxLockArg &arg);
-  bool is_can_elr() const { return can_elr_; }
 public:
   void set_exiting() { is_exiting_ = true; }
   bool is_exiting() const { return is_exiting_; }
@@ -189,7 +188,7 @@ protected:
   MonotonicTs get_stc_();
   ObITsMgr *get_ts_mgr_();
   bool has_callback_scheduler_();
-  int defer_callback_scheduler_(const int ret, const int64_t commit_version);
+  int defer_callback_scheduler_(const int ret, const share::SCN &commit_version);
   int64_t get_remaining_wait_interval_us_()
   {
     return trans_need_wait_wrap_.get_remaining_wait_interval_us();
@@ -269,8 +268,6 @@ protected:
   bool has_pending_callback_;
   // whether the trans can release locks early
   bool can_elr_;
-  // del part ctx from hashmap after unlock to avoid deadlock between foreach/remove_if and del
-  bool need_del_ctx_;
   // inc opid before ctx unlocked
   int64_t opid_;
 

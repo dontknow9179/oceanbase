@@ -202,7 +202,7 @@ int get_ls_read_snapshot(ObTxDesc &tx,
  * OB_TIMEOUT - if expire_ts hit
  */
 int get_read_snapshot_version(const int64_t expire_ts,
-                              int64_t &snapshot_version);
+                              share::SCN &snapshot_version);
 
 /**
  * get_ls_read_snapshot_version - get a read snapshot of specified
@@ -222,17 +222,19 @@ int get_read_snapshot_version(const int64_t expire_ts,
  * OB_TIMEOUT    - if expire_ts hit
  */
 int get_ls_read_snapshot_version(const share::ObLSID &local_ls_id,
-                                 int64_t &snapshot_version);
+                                 share::SCN &snapshot_version);
 /**
  * get_weak_read_snapshot_version - get snapshot version for weak read
  *
+ * max_read_stale_time              the minimal threshold of stale snapshot
  * @snapshot_version:               the snapshot acquired
  *
  * Return:
  * OB_SUCCESS              - OK
  * OB_REPLICA_NOT_READABLE - snapshot is too stale
  */
-int get_weak_read_snapshot_version(int64_t &snapshot_version);
+int get_weak_read_snapshot_version(const int64_t max_read_stale_time,
+                                   share::SCN &snapshot_version);
 /*
  * release_snapshot - release snapshot
  *
@@ -539,5 +541,5 @@ int is_tx_active(const ObTransID &tx_id, bool &active);
  * between tighly couple branchs around the SQL stmt
  * these hooks place on stmt start and end position to handle these works
  *****************************************************************************/
-int sql_stmt_start_hook(const ObXATransID &xid, ObTxDesc &tx);
+int sql_stmt_start_hook(const ObXATransID &xid, ObTxDesc &tx, const uint32_t session_id);
 int sql_stmt_end_hook(const ObXATransID &xid, ObTxDesc &tx);

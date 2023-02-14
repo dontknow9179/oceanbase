@@ -27,42 +27,18 @@ using namespace ::testing;
 using namespace transaction;
 using namespace share;
 
-namespace common
+namespace concurrent_control
 {
-void* ObGMemstoreAllocator::alloc(AllocHandle& handle, int64_t size)
+int check_sequence_set_violation(const concurrent_control::ObWriteFlag ,
+                                 const int64_t ,
+                                 const ObTransID ,
+                                 const blocksstable::ObDmlFlag ,
+                                 const int64_t ,
+                                 const ObTransID ,
+                                 const blocksstable::ObDmlFlag ,
+                                 const int64_t )
 {
-  int ret = OB_SUCCESS;
-  int64_t align_size = upper_align(size, sizeof(int64_t));
-  uint64_t tenant_id = arena_.get_tenant_id();
-  bool is_out_of_mem = false;
-  if (!handle.is_id_valid()) {
-    COMMON_LOG(TRACE, "MTALLOC.first_alloc", KP(&handle.mt_));
-    LockGuard guard(lock_);
-    if (!handle.is_id_valid()) {
-      handle.set_clock(arena_.retired());
-      hlist_.set_active(handle);
-    }
-  }
-  MTL_SWITCH(tenant_id) {
-    storage::ObTenantFreezer *freezer = nullptr;
-    if (handle.mt_.is_inner_tablet()) {
-      // inner table memory not limited by memstore
-    } else if (is_virtual_tenant_id(tenant_id)) {
-      // virtual tenant should not have memstore.
-      ret = OB_ERR_UNEXPECTED;
-      COMMON_LOG(ERROR, "virtual tenant should not have memstore", K(ret), K(tenant_id));
-    } else if (FALSE_IT(freezer = MTL(storage::ObTenantFreezer*))) {
-    } else if (OB_FAIL(freezer->check_tenant_out_of_memstore_limit(is_out_of_mem))) {
-      COMMON_LOG(ERROR, "fail to check tenant out of mem limit", K(ret), K(tenant_id));
-    }
-  }
-  if (OB_FAIL(ret)) {
-    is_out_of_mem = true;
-  }
-  if (is_out_of_mem && REACH_TIME_INTERVAL(1 * 1000 * 1000)) {
-    STORAGE_LOG(WARN, "this tenant is already out of memstore limit or some thing wrong.", K(tenant_id));
-  }
-  return is_out_of_mem ? nullptr : arena_.alloc(handle.id_, handle.arena_handle_, align_size);
+  return OB_SUCCESS;
 }
 }
 
@@ -71,6 +47,7 @@ class ObTestTx : public ::testing::Test
 public:
   virtual void SetUp() override
   {
+    ObMallocAllocator::get_instance()->create_and_add_tenant_allocator(1001);
     const uint64_t tv = ObTimeUtility::current_time();
     ObCurTraceId::set(&tv);
     GCONF._ob_trans_rpc_timeout = 500;
@@ -87,6 +64,7 @@ public:
     auto test_name = test_info->name();
     _TRANS_LOG(INFO, ">>>> tearDown test : %s", test_name);
     ObClockGenerator::destroy();
+    ObMallocAllocator::get_instance()->recycle_tenant_allocator(1001);
   }
   MsgBus bus_;
 };
@@ -789,7 +767,7 @@ TEST_F(ObTestTx, replay_basic)
     int64_t retry_count = 0;
     while(ls_tx_ctx_mgr->get_tx_ctx_count() > 0)
     {
-      TRANS_LOG(ERROR, "unexpected tx ctx counts", K(ls_tx_ctx_mgr->get_ls_id()), K(ls_tx_ctx_mgr->get_tx_ctx_count()));
+      TRANS_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "unexpected tx ctx counts", K(ls_tx_ctx_mgr->get_ls_id()), K(ls_tx_ctx_mgr->get_tx_ctx_count()));
       ls_tx_ctx_mgr->print_all_tx_ctx(ObLSTxCtxMgr::MAX_HASH_ITEM_PRINT, true);
       ls_tx_ctx_mgr->get_retain_ctx_mgr().print_retain_ctx_info(ls_tx_ctx_mgr->get_ls_id());
       retry_count++;
@@ -1006,7 +984,7 @@ TEST_F(ObTestTx, wait_commit_version_elapse_block)
     ASSERT_EQ(OB_ENTRY_NOT_EXIST, n2->read(snapshot, 100, val1));
   }
 
-  ObTxNode::get_ts_mgr_().update_fake_gts(ls_tx_ctx_mgr2->max_replay_commit_version_);
+  ObTxNode::get_ts_mgr_().update_fake_gts(ls_tx_ctx_mgr2->max_replay_commit_version_.get_val_for_gts());
   { // prepare snapshot for read
     ObTxReadSnapshot snapshot;
     ASSERT_EQ(OB_SUCCESS, n2->get_read_snapshot(tx2,
@@ -1108,7 +1086,7 @@ TEST_F(ObTestTx, wait_commit_version_elapse_block_and_switch_to_follower_forcedl
     ASSERT_EQ(OB_ENTRY_NOT_EXIST, n2->read(snapshot, 100, val1));
   }
 
-  ObTxNode::get_ts_mgr_().update_fake_gts(ls_tx_ctx_mgr2->max_replay_commit_version_);
+  ObTxNode::get_ts_mgr_().update_fake_gts(ls_tx_ctx_mgr2->max_replay_commit_version_.get_val_for_gts());
   { // prepare snapshot for read
     ObTxReadSnapshot snapshot;
     ASSERT_EQ(OB_SUCCESS, n2->get_read_snapshot(tx2,

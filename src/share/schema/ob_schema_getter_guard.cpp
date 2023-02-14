@@ -224,7 +224,8 @@ int ObSchemaGetterGuard::get_can_read_index_array(
     int64_t &size,
     bool with_mv,
     bool with_global_index /* =true */,
-    bool with_domain_index /*=true*/)
+    bool with_domain_index /*=true*/,
+    bool with_spatial_index /*=true*/)
 {
   int ret = OB_SUCCESS;
   const ObTableSchema *table_schema = NULL;
@@ -238,6 +239,7 @@ int ObSchemaGetterGuard::get_can_read_index_array(
     ObSEArray<ObAuxTableMetaInfo, 16> simple_index_infos;
     const ObTableSchema *index_schema = NULL;
     int64_t can_read_count = 0;
+    bool is_geo_default_srid = false;
     if (OB_FAIL(table_schema->get_simple_index_infos(simple_index_infos))) {
       LOG_WARN("get simple_index_infos failed", KR(ret), K(tenant_id), K(table_id));
     }
@@ -248,6 +250,17 @@ int ObSchemaGetterGuard::get_can_read_index_array(
       } else if (OB_ISNULL(index_schema)) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("index schema should not be null", KR(ret), K(tenant_id), K(index_id));
+      } else if (index_schema->is_spatial_index() && !with_spatial_index) {
+        uint64_t geo_col_id = UINT64_MAX;
+        const ObColumnSchemaV2 *geo_column = NULL;
+        is_geo_default_srid = false;
+        if (OB_FAIL(index_schema->get_spatial_geo_column_id(geo_col_id))) {
+          LOG_WARN("failed to get geometry column id", K(ret));
+        } else if (OB_ISNULL(geo_column = table_schema->get_column_schema(geo_col_id))) {
+          LOG_WARN("failed to get geometry column", K(ret), K(geo_col_id));
+        } else if (geo_column->is_default_srid()) {
+          is_geo_default_srid = true;
+        }
       }
       if (OB_SUCC(ret)) {
         if (!with_mv && index_schema->is_materialized_view()) {
@@ -256,6 +269,8 @@ int ObSchemaGetterGuard::get_can_read_index_array(
           // skip
         } else if (!with_domain_index && index_schema->is_domain_index()) {
           // does not need domain index, skip it
+        } else if (!with_spatial_index && index_schema->is_spatial_index() && is_geo_default_srid) {
+          // skip spatial index when geometry column has not specific srid.
         } else if (index_schema->can_read_index() && index_schema->is_index_visible()) {
           index_tid_array[can_read_count++] = simple_index_infos.at(i).table_id_;
         } else {
@@ -1293,6 +1308,250 @@ int ObSchemaGetterGuard::get_directory_schema_by_id(const uint64_t tenant_id,
   } else if (OB_ISNULL(schema)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("NULL ptr", KR(ret), KP(schema));
+  }
+  return ret;
+}
+
+
+int ObSchemaGetterGuard::get_rls_policy_schema_by_name(const uint64_t tenant_id,
+                                                       const uint64_t table_id,
+                                                       const uint64_t rls_group_id,
+                                                       const ObString &name,
+                                                       const ObRlsPolicySchema *&schema)
+{
+  int ret = OB_SUCCESS;
+  const ObSchemaMgr *mgr = NULL;
+  schema = NULL;
+  if (OB_UNLIKELY(!check_inner_stat())) {
+    ret = OB_INNER_STAT_ERROR;
+    LOG_WARN("inner stat error", KR(ret));
+  } else if (OB_UNLIKELY(!is_valid_tenant_id(tenant_id) || !is_valid_id(table_id) ||
+                         !is_valid_id(rls_group_id) || name.empty())) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", KR(ret), K(tenant_id), K(table_id), K(rls_group_id), K(name));
+  } else if (OB_FAIL(check_tenant_schema_guard(tenant_id))) {
+    LOG_WARN("fail to check tenant schema guard", KR(ret), K(tenant_id), K_(tenant_id));
+  } else if (OB_FAIL(check_lazy_guard(tenant_id, mgr))) {
+    LOG_WARN("fail to check lazy guard", KR(ret), K(tenant_id));
+  } else if (OB_FAIL(mgr->rls_policy_mgr_.get_schema_by_name(tenant_id, table_id, rls_group_id,
+                                                             name, schema))) {
+    LOG_WARN("get schema failed", KR(ret), K(tenant_id), K(table_id), K(rls_group_id), K(name));
+  }
+  return ret;
+}
+
+int ObSchemaGetterGuard::get_rls_policy_schema_by_id(const uint64_t tenant_id,
+                                                     const uint64_t rls_policy_id,
+                                                     const ObRlsPolicySchema *&schema)
+{
+  int ret = OB_SUCCESS;
+  const ObSchemaMgr *mgr = NULL;
+  schema = NULL;
+  if (OB_UNLIKELY(!check_inner_stat())) {
+    ret = OB_INNER_STAT_ERROR;
+    LOG_WARN("inner stat error", KR(ret));
+  } else if (OB_UNLIKELY(!is_valid_tenant_id(tenant_id) || !is_valid_id(rls_policy_id))) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", KR(ret), K(tenant_id), K(rls_policy_id));
+  } else if (OB_FAIL(check_tenant_schema_guard(tenant_id))) {
+    LOG_WARN("fail to check tenant schema guard", KR(ret), K(tenant_id), K_(tenant_id));
+  } else if (OB_FAIL(check_lazy_guard(tenant_id, mgr))) {
+    LOG_WARN("fail to check lazy guard", KR(ret), K(tenant_id));
+  } else if (OB_FAIL(mgr->rls_policy_mgr_.get_schema_by_id(rls_policy_id, schema))) {
+    LOG_WARN("get schema failed", KR(ret), K(rls_policy_id));
+  }
+  return ret;
+}
+
+int ObSchemaGetterGuard::get_rls_policy_schemas_in_table(const uint64_t tenant_id,
+    const uint64_t table_id,
+    ObIArray<const ObRlsPolicySchema *> &schemas)
+{
+  int ret = OB_SUCCESS;
+  const ObSchemaMgr *mgr = NULL;
+  schemas.reset();
+  if (OB_UNLIKELY(!check_inner_stat())) {
+    ret = OB_INNER_STAT_ERROR;
+    LOG_WARN("inner stat error", KR(ret));
+  } else if (OB_UNLIKELY(!is_valid_tenant_id(tenant_id) || !is_valid_id(table_id))) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", KR(ret), K(tenant_id), K(table_id));
+  } else if (OB_FAIL(check_tenant_schema_guard(tenant_id))) {
+    LOG_WARN("fail to check tenant schema guard", KR(ret), K(tenant_id), K_(tenant_id));
+  } else if (OB_FAIL(check_lazy_guard(tenant_id, mgr))) {
+    LOG_WARN("fail to check lazy guard", KR(ret), K(tenant_id));
+  } else if (OB_FAIL(mgr->rls_policy_mgr_.get_schemas_in_table(tenant_id, table_id, schemas))) {
+    LOG_WARN("get rls policy schemas in table failed", KR(ret), K(tenant_id), K(table_id));
+  }
+  return ret;
+}
+
+int ObSchemaGetterGuard::get_rls_policy_schemas_in_group(const uint64_t tenant_id,
+    const uint64_t table_id,
+    const uint64_t rls_group_id,
+    ObIArray<const ObRlsPolicySchema *> &schemas)
+{
+  int ret = OB_SUCCESS;
+  const ObSchemaMgr *mgr = NULL;
+  schemas.reset();
+  if (OB_UNLIKELY(!check_inner_stat())) {
+    ret = OB_INNER_STAT_ERROR;
+    LOG_WARN("inner stat error", KR(ret));
+  } else if (OB_UNLIKELY(!is_valid_tenant_id(tenant_id) || !is_valid_id(table_id)
+                         || !is_valid_id(rls_group_id))) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", KR(ret), K(tenant_id), K(table_id), K(rls_group_id));
+  } else if (OB_FAIL(check_tenant_schema_guard(tenant_id))) {
+    LOG_WARN("fail to check tenant schema guard", KR(ret), K(tenant_id), K_(tenant_id));
+  } else if (OB_FAIL(check_lazy_guard(tenant_id, mgr))) {
+    LOG_WARN("fail to check lazy guard", KR(ret), K(tenant_id));
+  } else if (OB_FAIL(mgr->rls_policy_mgr_.get_schemas_in_group(tenant_id, table_id,
+      rls_group_id, schemas))) {
+    LOG_WARN("get rls policy schemas in group failed", KR(ret), K(tenant_id), K(table_id));
+  }
+  return ret;
+}
+
+int ObSchemaGetterGuard::get_rls_group_schema_by_name(const uint64_t tenant_id,
+                                                       const uint64_t table_id,
+                                                       const ObString &name,
+                                                       const ObRlsGroupSchema *&schema)
+{
+  int ret = OB_SUCCESS;
+  const ObSchemaMgr *mgr = NULL;
+  schema = NULL;
+  if (OB_UNLIKELY(!check_inner_stat())) {
+    ret = OB_INNER_STAT_ERROR;
+    LOG_WARN("inner stat error", KR(ret));
+  } else if (OB_UNLIKELY(!is_valid_tenant_id(tenant_id) || !is_valid_id(table_id) ||
+                         name.empty())) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", KR(ret), K(tenant_id), K(table_id), K(name));
+  } else if (OB_FAIL(check_tenant_schema_guard(tenant_id))) {
+    LOG_WARN("fail to check tenant schema guard", KR(ret), K(tenant_id), K_(tenant_id));
+  } else if (OB_FAIL(check_lazy_guard(tenant_id, mgr))) {
+    LOG_WARN("fail to check lazy guard", KR(ret), K(tenant_id));
+  } else if (OB_FAIL(mgr->rls_group_mgr_.get_schema_by_name(tenant_id, table_id, name, schema))) {
+    LOG_WARN("get schema failed", KR(ret), K(tenant_id), K(table_id), K(name));
+  }
+  return ret;
+}
+
+int ObSchemaGetterGuard::get_rls_group_schema_by_id(const uint64_t tenant_id,
+                                                    const uint64_t rls_group_id,
+                                                    const ObRlsGroupSchema *&schema)
+{
+  int ret = OB_SUCCESS;
+  const ObSchemaMgr *mgr = NULL;
+  schema = NULL;
+  if (OB_UNLIKELY(!check_inner_stat())) {
+    ret = OB_INNER_STAT_ERROR;
+    LOG_WARN("inner stat error", KR(ret));
+  } else if (OB_UNLIKELY(!is_valid_tenant_id(tenant_id) || !is_valid_id(rls_group_id))) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", KR(ret), K(tenant_id), K(rls_group_id));
+  } else if (OB_FAIL(check_tenant_schema_guard(tenant_id))) {
+    LOG_WARN("fail to check tenant schema guard", KR(ret), K(tenant_id), K_(tenant_id));
+  } else if (OB_FAIL(check_lazy_guard(tenant_id, mgr))) {
+    LOG_WARN("fail to check lazy guard", KR(ret), K(tenant_id));
+  } else if (OB_FAIL(mgr->rls_group_mgr_.get_schema_by_id(rls_group_id, schema))) {
+    LOG_WARN("get schema failed", KR(ret), K(rls_group_id));
+  }
+  return ret;
+}
+
+int ObSchemaGetterGuard::get_rls_group_schemas_in_table(const uint64_t tenant_id,
+    const uint64_t table_id,
+    ObIArray<const ObRlsGroupSchema *> &schemas)
+{
+  int ret = OB_SUCCESS;
+  const ObSchemaMgr *mgr = NULL;
+  schemas.reset();
+  if (OB_UNLIKELY(!check_inner_stat())) {
+    ret = OB_INNER_STAT_ERROR;
+    LOG_WARN("inner stat error", KR(ret));
+  } else if (OB_UNLIKELY(!is_valid_tenant_id(tenant_id) || !is_valid_id(table_id))) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", KR(ret), K(tenant_id), K(table_id));
+  } else if (OB_FAIL(check_tenant_schema_guard(tenant_id))) {
+    LOG_WARN("fail to check tenant schema guard", KR(ret), K(tenant_id), K_(tenant_id));
+  } else if (OB_FAIL(check_lazy_guard(tenant_id, mgr))) {
+    LOG_WARN("fail to check lazy guard", KR(ret), K(tenant_id));
+  } else if (OB_FAIL(mgr->rls_group_mgr_.get_schemas_in_table(tenant_id, table_id, schemas))) {
+    LOG_WARN("get rls group schemas in table failed", KR(ret), K(tenant_id), K(table_id));
+  }
+  return ret;
+}
+
+int ObSchemaGetterGuard::get_rls_context_schema_by_name(const uint64_t tenant_id,
+                                                       const uint64_t table_id,
+                                                       const ObString &name,
+                                                       const ObString &attribute,
+                                                       const ObRlsContextSchema *&schema)
+{
+  int ret = OB_SUCCESS;
+  const ObSchemaMgr *mgr = NULL;
+  schema = NULL;
+  if (OB_UNLIKELY(!check_inner_stat())) {
+    ret = OB_INNER_STAT_ERROR;
+    LOG_WARN("inner stat error", KR(ret));
+  } else if (OB_UNLIKELY(!is_valid_tenant_id(tenant_id) || !is_valid_id(table_id) ||
+                         name.empty() || attribute.empty())) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", KR(ret), K(tenant_id), K(table_id), K(name), K(attribute));
+  } else if (OB_FAIL(check_tenant_schema_guard(tenant_id))) {
+    LOG_WARN("fail to check tenant schema guard", KR(ret), K(tenant_id), K_(tenant_id));
+  } else if (OB_FAIL(check_lazy_guard(tenant_id, mgr))) {
+    LOG_WARN("fail to check lazy guard", KR(ret), K(tenant_id));
+  } else if (OB_FAIL(mgr->rls_context_mgr_.get_schema_by_name(tenant_id, table_id, name,
+                                                             attribute, schema))) {
+    LOG_WARN("get schema failed", KR(ret), K(tenant_id), K(table_id), K(name), K(attribute));
+  }
+  return ret;
+}
+
+int ObSchemaGetterGuard::get_rls_context_schema_by_id(const uint64_t tenant_id,
+                                                     const uint64_t rls_context_id,
+                                                     const ObRlsContextSchema *&schema)
+{
+  int ret = OB_SUCCESS;
+  const ObSchemaMgr *mgr = NULL;
+  schema = NULL;
+  if (OB_UNLIKELY(!check_inner_stat())) {
+    ret = OB_INNER_STAT_ERROR;
+    LOG_WARN("inner stat error", KR(ret));
+  } else if (OB_UNLIKELY(!is_valid_tenant_id(tenant_id) || !is_valid_id(rls_context_id))) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", KR(ret), K(tenant_id), K(rls_context_id));
+  } else if (OB_FAIL(check_tenant_schema_guard(tenant_id))) {
+    LOG_WARN("fail to check tenant schema guard", KR(ret), K(tenant_id), K_(tenant_id));
+  } else if (OB_FAIL(check_lazy_guard(tenant_id, mgr))) {
+    LOG_WARN("fail to check lazy guard", KR(ret), K(tenant_id));
+  } else if (OB_FAIL(mgr->rls_context_mgr_.get_schema_by_id(rls_context_id, schema))) {
+    LOG_WARN("get schema failed", KR(ret), K(rls_context_id));
+  }
+  return ret;
+}
+
+int ObSchemaGetterGuard::get_rls_context_schemas_in_table(const uint64_t tenant_id,
+    const uint64_t table_id,
+    ObIArray<const ObRlsContextSchema *> &schemas)
+{
+  int ret = OB_SUCCESS;
+  const ObSchemaMgr *mgr = NULL;
+  schemas.reset();
+  if (OB_UNLIKELY(!check_inner_stat())) {
+    ret = OB_INNER_STAT_ERROR;
+    LOG_WARN("inner stat error", KR(ret));
+  } else if (OB_UNLIKELY(!is_valid_tenant_id(tenant_id) || !is_valid_id(table_id))) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", KR(ret), K(tenant_id), K(table_id));
+  } else if (OB_FAIL(check_tenant_schema_guard(tenant_id))) {
+    LOG_WARN("fail to check tenant schema guard", KR(ret), K(tenant_id), K_(tenant_id));
+  } else if (OB_FAIL(check_lazy_guard(tenant_id, mgr))) {
+    LOG_WARN("fail to check lazy guard", KR(ret), K(tenant_id));
+  } else if (OB_FAIL(mgr->rls_context_mgr_.get_schemas_in_table(tenant_id, table_id, schemas))) {
+    LOG_WARN("get rls context schemas in table failed", KR(ret), K(tenant_id), K(table_id));
   }
   return ret;
 }
@@ -4779,6 +5038,25 @@ int ObSchemaGetterGuard::get_table_schemas_in_tenant(
     common::ObIArray<const ObTableSchema *> &table_schemas)
 {
   int ret = OB_SUCCESS;
+  bool only_view_schema = false;
+  ret = get_table_schemas_in_tenant_(tenant_id, only_view_schema, table_schemas);
+  return ret;
+}
+
+int ObSchemaGetterGuard::get_view_schemas_in_tenant(const uint64_t tenant_id,
+                                                    ObIArray<const ObTableSchema *> &table_schemas)
+{
+  int ret = OB_SUCCESS;
+  bool only_view_schema = true;
+  ret = get_table_schemas_in_tenant_(tenant_id, only_view_schema, table_schemas);
+  return ret;
+}
+
+int ObSchemaGetterGuard::get_table_schemas_in_tenant_(const uint64_t tenant_id,
+                                                      const bool only_view_schema,
+                                                      ObIArray<const ObTableSchema *> &table_schemas)
+{
+  int ret = OB_SUCCESS;
   const ObSchemaMgr *mgr = NULL;
   ObArray<const ObSimpleTableSchemaV2 *> schemas;
 
@@ -4809,6 +5087,8 @@ int ObSchemaGetterGuard::get_table_schemas_in_tenant(
       if (OB_ISNULL(tmp_schema)) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("NULL ptr", KR(ret), KP(tmp_schema));
+      } else if (only_view_schema && !tmp_schema->is_view_table()) {
+        // do nothing
       } else if (OB_FAIL(get_schema(TABLE_SCHEMA,
           tmp_schema->get_tenant_id(), tmp_schema->get_table_id(),
           table_schema, tmp_schema->get_schema_version()))) {
@@ -6944,7 +7224,7 @@ bool ObSchemaGetterGuard::is_tenant_schema_valid(const int64_t tenant_id) const
   int tmp_ret = OB_SUCCESS;
   int64_t schema_version = OB_INVALID_VERSION;
   if (OB_SUCCESS != (tmp_ret = get_schema_version(tenant_id, schema_version))) {
-    LOG_WARN("fail to get schema version", K(tmp_ret), K(tenant_id));
+    LOG_WARN_RET(tmp_ret, "fail to get schema version", K(tmp_ret), K(tenant_id));
     bret = false;
   } else if (schema_version <= OB_CORE_SCHEMA_VERSION) {
     bret = false;
@@ -7283,12 +7563,13 @@ int ObSchemaGetterGuard::get_tenant_mv_ids(const uint64_t tenant_id, ObArray<uin
 
 int ObSchemaGetterGuard::check_udf_exist_with_name(const uint64_t tenant_id,
                                                    const common::ObString &name,
-                                                   bool &exist)
+                                                   bool &exist,
+                                                   uint64_t &udf_id)
 {
   int ret = OB_SUCCESS;
   const ObSchemaMgr *mgr = NULL;
   exist = false;
-
+  udf_id = OB_INVALID_ID;
   if (!check_inner_stat()) {
     ret = OB_INNER_STAT_ERROR;
     LOG_WARN("inner stat error", KR(ret));
@@ -7309,6 +7590,7 @@ int ObSchemaGetterGuard::check_udf_exist_with_name(const uint64_t tenant_id,
                K(tenant_id), K(name));
     } else if (OB_NOT_NULL(schema)) {
       exist = true;
+      udf_id = schema->get_udf_id();
     }
   }
   return ret;
@@ -7985,7 +8267,9 @@ int ObSchemaGetterGuard::get_link_table_schema(
     const ObString &table_name,
     ObIAllocator &allocator,
     ObTableSchema *&table_schema,
-    uint32_t sessid)
+    sql::ObSQLSessionInfo *session_info,
+    const ObString &dblink_name,
+    bool is_reverse_link)
 {
   int ret = OB_SUCCESS;
   const ObDbLinkSchema *dblink_schema = NULL;
@@ -7995,17 +8279,16 @@ int ObSchemaGetterGuard::get_link_table_schema(
   } else if (OB_ISNULL(schema_service_)) {
     ret = OB_INNER_STAT_ERROR;
     LOG_WARN("schema service is NULL", KR(ret));
-  } else if (OB_FAIL(get_dblink_schema(tenant_id, dblink_id, dblink_schema))) {
+  } else if (!is_reverse_link && OB_FAIL(get_dblink_schema(tenant_id, dblink_id, dblink_schema))) {
     LOG_WARN("get dblink schema failed", KR(ret), K(tenant_id));
-  } else if (OB_ISNULL(dblink_schema)) {
-    ret = OB_INNER_STAT_ERROR;
-    LOG_WARN("dblink schema is NULL", KR(ret));
-  } else if (OB_FAIL(schema_service_->fetch_link_table_schema(*dblink_schema,
+  } else if (OB_FAIL(schema_service_->fetch_link_table_schema(dblink_schema,
                                                               database_name, table_name,
                                                               allocator, table_schema,
-                                                              sessid))) {
+                                                              session_info, dblink_name,
+                                                              is_reverse_link))) {
     LOG_WARN("get link table schema failed", KR(ret));
   }
+  LOG_DEBUG("get link table schema", K(is_reverse_link), KP(dblink_schema), K(ret));
   return ret;
 }
 
@@ -8417,7 +8700,7 @@ bool ObSchemaGetterGuard::ignore_tenant_not_exist_error(
     bool is_restore = false;
     int tmp_ret = check_tenant_is_restore(tenant_id, is_restore);
     if (OB_SUCCESS != tmp_ret) {
-      LOG_WARN("fail to check tenant is restore", K(bret), K(tmp_ret), K(tenant_id));
+      LOG_WARN_RET(tmp_ret, "fail to check tenant is restore", K(bret), K(tmp_ret), K(tenant_id));
     } else if (is_restore) {
       bret = true;
     }

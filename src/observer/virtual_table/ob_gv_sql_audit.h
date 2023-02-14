@@ -158,7 +158,12 @@ private:
     PLAN_HASH,
     USER_GROUP,
     LOCK_FOR_READ_TIME,
-    PARAMS_VALUE
+    PARAMS_VALUE,
+    RULE_NAME,
+    PROXY_SESSION_ID,
+    TX_FREE_ROUTE_FLAG,
+
+    PARTITION_HIT,
   };
 
   const static int64_t PRI_KEY_IP_IDX        = 0;

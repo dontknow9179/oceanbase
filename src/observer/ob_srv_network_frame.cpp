@@ -21,6 +21,7 @@
 #include "observer/ob_server_struct.h"
 #include "observer/ob_rpc_intrusion_detect.h"
 #include "storage/ob_locality_manager.h"
+#include "lib/ssl/ob_ssl_config.h"
 #include <sys/types.h>
 #include <sys/stat.h>
 #include "storage/ob_locality_manager.h"
@@ -29,6 +30,7 @@ using namespace oceanbase::rpc::frame;
 using namespace oceanbase::common;
 using namespace oceanbase::observer;
 using namespace oceanbase::share;
+using namespace oceanbase::obmysql;
 
 ObSrvNetworkFrame::ObSrvNetworkFrame(ObGlobalContext &gctx)
     : gctx_(gctx),
@@ -76,6 +78,19 @@ static int get_default_net_thread_count()
   return cnt;
 }
 
+static int update_tcp_keepalive_parameters_for_sql_nio_server(int tcp_keepalive_enabled, int64_t tcp_keepidle, int64_t tcp_keepintvl, int64_t tcp_keepcnt)
+{
+  int ret = OB_SUCCESS;
+  if (enable_new_sql_nio()) {
+    if (NULL != global_sql_nio_server) {
+      tcp_keepidle = max(tcp_keepidle/1000000, 1);
+      tcp_keepintvl = max(tcp_keepintvl/1000000, 1);
+      global_sql_nio_server->update_tcp_keepalive_params(tcp_keepalive_enabled, tcp_keepidle, tcp_keepintvl, tcp_keepcnt);
+    }
+  }
+  return ret;
+}
+
 int ObSrvNetworkFrame::init()
 {
   int ret = OB_SUCCESS;
@@ -95,6 +110,7 @@ int ObSrvNetworkFrame::init()
   opts.mysql_io_cnt_ = io_cnt;
   opts.batch_rpc_io_cnt_ = io_cnt;
   opts.use_ipv6_ = GCONF.use_ipv6;
+  //TODO(tony.wzh): fix opts.tcp_keepidle  negative
   opts.tcp_user_timeout_ = static_cast<int>(GCONF.dead_socket_detection_timeout);
   opts.tcp_keepidle_     = static_cast<int>(GCONF.tcp_keepidle);
   opts.tcp_keepintvl_    = static_cast<int>(GCONF.tcp_keepintvl);
@@ -184,6 +200,7 @@ int ObSrvNetworkFrame::start()
   return ret;
 }
 
+
 int ObSrvNetworkFrame::reload_config()
 {
   int ret = common::OB_SUCCESS;
@@ -216,6 +233,10 @@ int ObSrvNetworkFrame::reload_config()
                                                           tcp_keepidle, tcp_keepintvl,
                                                           tcp_keepcnt))) {
     LOG_WARN("Failed to set sql tcp keepalive parameters.");
+  } else if (OB_FAIL(update_tcp_keepalive_parameters_for_sql_nio_server(enable_tcp_keepalive,
+                                                                        tcp_keepidle, tcp_keepintvl,
+                                                                        tcp_keepcnt))) {
+    LOG_WARN("Failed to set sql tcp keepalive parameters for sql nio server", K(ret));
   }
 
   return ret;
@@ -366,6 +387,16 @@ int ObSrvNetworkFrame::reload_ssl_config()
           last_ssl_info_hash_ = new_hash_value;
           LOG_INFO("finish reload_ssl_config", K(use_bkmi), K(use_bkmi), K(use_sm),
                    "ssl_key_expired_time", GCTX.ssl_key_expired_time_, K(new_hash_value));
+          if (OB_SUCC(ret)) {
+            if (enable_new_sql_nio()) {
+              common::ObSSLConfig ssl_config(!use_bkmi, use_sm, ca_cert, public_cert, private_key, NULL, NULL);
+              if (OB_FAIL(ob_ssl_load_config(OB_SSL_CTX_ID_SQL_NIO, ssl_config))) {
+                LOG_WARN("create ssl ctx failed!", K(ret));
+              } else {
+                LOG_INFO("create ssl ctx success!", K(use_bkmi), K(use_sm));
+              }
+            }
+          }
         }
       }
     }
@@ -423,9 +454,6 @@ int ObSrvNetworkFrame::stop()
   if (OB_FAIL(net_.stop())) {
     LOG_WARN("stop easy net fail", K(ret));
   } 
-  if (NULL != obmysql::global_sql_nio_server) {
-    obmysql::global_sql_nio_server->stop();
-  }
   return ret;
 }
 
@@ -458,4 +486,11 @@ void ObSrvNetworkFrame::set_ratelimit_enable(int ratelimit_enabled)
 {
   rpc_transport_->set_ratelimit_enable(ratelimit_enabled);
   batch_rpc_transport_->set_ratelimit_enable(ratelimit_enabled);
+}
+
+void ObSrvNetworkFrame::sql_nio_stop()
+{
+  if (NULL != obmysql::global_sql_nio_server) {
+    obmysql::global_sql_nio_server->stop();
+  }
 }

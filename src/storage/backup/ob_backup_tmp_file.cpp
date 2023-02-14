@@ -95,7 +95,6 @@ int ObBackupTmpFile::get_io_info_(const char *buf, const int64_t size, ObTmpFile
   io_info.reset();
   io_info.fd_ = file_fd_;
   io_info.tenant_id_ = tenant_id_;
-  io_info.io_desc_.set_category(ObIOCategory::USER_IO);
   io_info.io_desc_.set_wait_event(2);
   io_info.buf_ = const_cast<char *>(buf);
   io_info.size_ = size;
@@ -154,7 +153,7 @@ void ObBackupIndexBufferNode::reset()
   if (!tmp_file_.is_opened()) {
     // do nothing
   } else if (OB_TMP_FAIL(tmp_file_.close())) {
-    LOG_ERROR("failed to close tmp file", K(tmp_ret));
+    LOG_ERROR_RET(tmp_ret, "failed to close tmp file", K(tmp_ret));
   }
 }
 

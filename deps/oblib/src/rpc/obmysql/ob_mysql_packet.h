@@ -91,6 +91,23 @@ enum ObMySQLCmd
   COM_MAX_NUM
 };
 
+enum class ObMySQLPacketType
+{
+  INVALID_PKT = 0,
+  PKT_MYSQL,     // 1 -> mysql packet;
+  PKT_OKP,       // 2 -> okp;
+  PKT_ERR,       // 3 -> error packet;
+  PKT_EOF,       // 4 -> eof packet;
+  PKT_ROW,       // 5 -> row packet;
+  PKT_FIELD,     // 6 -> field packet;
+  PKT_PIECE,     // 7 -> piece packet;
+  PKT_STR,       // 8 -> string packet;
+  PKT_PREPARE,   // 9 -> prepare packet;
+  PKT_RESHEAD,   // 10 -> result header packet
+  PKT_PREXEC,    // 11 -> prepare execute packet;
+  PKT_END        // 12 -> end of packet type
+};
+
 union ObServerStatusFlags
 {
   ObServerStatusFlags() : flags_(0) {}
@@ -139,6 +156,8 @@ union ObProxyCapabilityFlags
                                                         && is_ob_protocol_v2_support(); }
   bool is_new_extra_info_support() const { return 1 == cap_flags_.OB_CAP_PROXY_NEW_EXTRA_INFO
                                                         && is_ob_protocol_v2_support(); }
+  bool is_session_var_sync_support() const { return 1 == cap_flags_.OB_CAP_PROXY_SESSION_VAR_SYNC
+                                                        && is_ob_protocol_v2_support(); }
 
   uint64_t capability_;
   struct CapabilityFlags
@@ -167,7 +186,8 @@ union ObProxyCapabilityFlags
     // for full trace_route
     uint64_t OB_CAP_PROXY_FULL_LINK_TRACING:           1;
     uint64_t OB_CAP_PROXY_NEW_EXTRA_INFO:              1;
-    uint64_t OB_CAP_RESERVED_NOT_USE:                 48;
+    uint64_t OB_CAP_PROXY_SESSION_VAR_SYNC:            1;
+    uint64_t OB_CAP_RESERVED_NOT_USE:                 47;
   } cap_flags_;
 };
 
@@ -411,7 +431,9 @@ public:
   virtual int64_t get_serialize_size() const;
   int encode(char *buffer, int64_t length, int64_t &pos, int64_t &pkt_count) const;
   int encode(char *buffer, int64_t length, int64_t &pos);
+  int get_pkt_len() { return hdr_.len_; }
   virtual int decode() { return common::OB_NOT_SUPPORTED; }
+  virtual ObMySQLPacketType get_mysql_packet_type() { return ObMySQLPacketType::INVALID_PKT; }
 
   virtual void reset()
   {
@@ -459,12 +481,16 @@ class ObMySQLRawPacket
 public:
   ObMySQLRawPacket() : ObMySQLPacket(), cmd_(COM_MAX_NUM),
                        can_reroute_pkt_(false),
+                       is_weak_read_(false),
+                       txn_free_route_(false),
                        extra_info_()
   {}
 
   explicit ObMySQLRawPacket(obmysql::ObMySQLCmd cmd)
     : ObMySQLPacket(), cmd_(cmd),
       can_reroute_pkt_(false),
+      is_weak_read_(false),
+      txn_free_route_(false),
       extra_info_()
   {}
 
@@ -479,6 +505,12 @@ public:
   inline void set_can_reroute_pkt(const bool can_rerute);
   inline bool can_reroute_pkt() const;
 
+  inline void set_is_weak_read(const bool v) { is_weak_read_ = v; }
+  inline bool is_weak_read() const { return is_weak_read_; }
+
+  inline void set_txn_free_route(const bool txn_free_route);
+  inline bool txn_free_route() const;
+
   inline void set_extra_info(const Ob20ExtraInfo &extra_info) { extra_info_ = extra_info; }
   inline const Ob20ExtraInfo &get_extra_info() const { return extra_info_; }
   bool exist_trace_info() const { return extra_info_.exist_trace_info_; }
@@ -489,6 +521,8 @@ public:
     ObMySQLPacket::reset();
     cmd_ = COM_MAX_NUM;
     can_reroute_pkt_ = false;
+    is_weak_read_ = false;
+    txn_free_route_ = false;
     extra_info_.reset();
   }
 
@@ -497,10 +531,12 @@ public:
     ObMySQLPacket::assign(other);
     cmd_ = other.cmd_;
     can_reroute_pkt_ = other.can_reroute_pkt_;
+    is_weak_read_ = other.is_weak_read_;
+    txn_free_route_ = other.txn_free_route_;
     extra_info_ = other.extra_info_;
   }
 
-  TO_STRING_KV("header", hdr_, "can_reroute", can_reroute_pkt_);
+  TO_STRING_KV("header", hdr_, "can_reroute", can_reroute_pkt_, "weak_read", is_weak_read_);
 protected:
   virtual int serialize(char*, const int64_t, int64_t&) const;
 
@@ -509,6 +545,8 @@ private:
 private:
   ObMySQLCmd cmd_;
   bool can_reroute_pkt_;
+  bool is_weak_read_;
+  bool txn_free_route_;
   Ob20ExtraInfo extra_info_;
 };
 
@@ -593,6 +631,30 @@ inline void ObMySQLRawPacket::set_can_reroute_pkt(const bool can_reroute)
 inline bool ObMySQLRawPacket::can_reroute_pkt() const
 {
   return can_reroute_pkt_;
+}
+
+union ObClientAttributeCapabilityFlags
+{
+  ObClientAttributeCapabilityFlags() : capability_(0) {}
+  explicit ObClientAttributeCapabilityFlags(uint64_t cap) : capability_(cap) {}
+  bool is_support_lob_locatorv2() const { return 1 == cap_flags_.OB_CLIENT_CAP_OB_LOB_LOCATOR_V2; }
+
+  uint64_t capability_;
+  struct CapabilityFlags
+  {
+    uint64_t OB_CLIENT_CAP_OB_LOB_LOCATOR_V2:       1;
+    uint64_t OB_CLIENT_CAP_RESERVED_NOT_USE:       63;
+  } cap_flags_;
+};
+
+inline void ObMySQLRawPacket::set_txn_free_route(const bool txn_free_route)
+{
+  txn_free_route_ = txn_free_route;
+}
+
+inline bool ObMySQLRawPacket::txn_free_route() const
+{
+  return txn_free_route_;
 }
 
 } // end of namespace obmysql

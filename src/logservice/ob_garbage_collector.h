@@ -43,6 +43,10 @@ namespace storage
 class ObLSService;
 class ObLS;
 }
+namespace share
+{
+class SCN;
+}
 namespace logservice
 {
 enum ObGCLSLOGType
@@ -227,7 +231,7 @@ public:
   virtual int replay(const void *buffer,
                      const int64_t nbytes,
                      const palf::LSN &lsn,
-                     const int64_t ts_ns) override;
+                     const share::SCN &scn) override;
 
   // for role change
   virtual void switch_to_follower_forcedly() override;
@@ -236,8 +240,8 @@ public:
   virtual int resume_leader() override;
 
   // for checkpoint
-  virtual int64_t get_rec_log_ts() override;
-  virtual int flush(int64_t rec_log_ts) override;
+  virtual share::SCN get_rec_scn() override;
+  virtual int flush(share::SCN &scn) override;
 
   TO_STRING_KV(K(is_inited_),
                K(gc_seq_invalid_member_));
@@ -276,9 +280,9 @@ private:
   };
 
 private:
-  const int64_t LS_CLOG_ALIVE_TIMEOUT_NS = 100 * 1000 * 1000; //100ms
-  const int64_t GET_GTS_TIMEOUT_NS = 10L * 1000 * 1000 * 1000; //10s
-  int get_gts_(const int64_t timeout_ns, int64_t &gts);
+  const int64_t LS_CLOG_ALIVE_TIMEOUT_US = 100 * 1000; //100ms
+  const int64_t GET_GTS_TIMEOUT_US = 10L * 1000 * 1000; //10s
+  int get_gts_(const int64_t timeout_us, share::SCN &gts_scn);
   bool is_ls_blocked_state_(const LSGCState &state);
   bool is_ls_offline_state_(const LSGCState &state);
   bool is_ls_wait_gc_state_(const LSGCState &state);
@@ -287,11 +291,13 @@ private:
   bool is_ls_offline_finished_(const LSGCState &state);
   void try_check_and_set_tablet_clear_(const ObGarbageCollector::LSStatus &ls_status);
   void try_check_and_set_wait_gc_(ObGarbageCollector::LSStatus &ls_status);
+  int get_tenant_readable_scn_(share::SCN &readable_scn);
+  int check_if_tenant_in_archive_(bool &in_archive);
   void submit_log_(const ObGCLSLOGType log_type);
   void update_ls_gc_state_after_submit_log_(const ObGCLSLOGType log_type,
-                                            const int64_t log_ts_ns);
-  void block_ls_transfer_in_(const int64_t block_ts_ns);
-  void offline_ls_(const int64_t offline_ts_ns);
+                                            const share::SCN &scn);
+  void block_ls_transfer_in_(const share::SCN &block_scn);
+  void offline_ls_(const share::SCN &offline_scn);
   int get_palf_role_(common::ObRole &role);
   void handle_gc_ls_dropping_(const ObGarbageCollector::LSStatus &ls_status);
   void handle_gc_ls_offline_(ObGarbageCollector::LSStatus &ls_status);

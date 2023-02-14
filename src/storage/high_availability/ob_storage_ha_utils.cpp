@@ -15,6 +15,7 @@
 #include "share/tablet/ob_tablet_table_operator.h"
 #include "share/ob_global_merge_table_operator.h"
 #include "share/ob_tablet_replica_checksum_operator.h"
+#include "share/scn.h"
 
 using namespace oceanbase::share;
 
@@ -27,7 +28,7 @@ int ObStorageHAUtils::check_tablet_replica_validity(const uint64_t tenant_id, co
     const common::ObAddr &src_addr, const common::ObTabletID &tablet_id, common::ObISQLClient &sql_client)
 {
   int ret = OB_SUCCESS;
-  int64_t compaction_scn = 0;
+  SCN compaction_scn;
   if (tablet_id.is_ls_inner_tablet()) {
     // do nothing
   } else if (OB_INVALID_ID == tenant_id || !ls_id.is_valid() || !src_addr.is_valid() || !tablet_id.is_valid()) {
@@ -62,7 +63,7 @@ int ObStorageHAUtils::check_merge_error_(const uint64_t tenant_id, common::ObISQ
 }
 
 int ObStorageHAUtils::fetch_src_tablet_meta_info_(const uint64_t tenant_id, const common::ObTabletID &tablet_id,
-    const share::ObLSID &ls_id, const common::ObAddr &src_addr, common::ObISQLClient &sql_client, int64_t &compaction_scn)
+    const share::ObLSID &ls_id, const common::ObAddr &src_addr, common::ObISQLClient &sql_client, SCN &compaction_scn)
 {
   int ret = OB_SUCCESS;
   ObTabletTableOperator op;
@@ -71,14 +72,14 @@ int ObStorageHAUtils::fetch_src_tablet_meta_info_(const uint64_t tenant_id, cons
     LOG_WARN("failed to init operator", K(ret));
   } else if (OB_FAIL(op.get(tenant_id, tablet_id, ls_id, src_addr, tablet_replica))) {
     LOG_WARN("failed to get tablet meta info", K(ret), K(tenant_id), K(tablet_id), K(ls_id), K(src_addr));
-  } else {
-    compaction_scn = tablet_replica.get_snapshot_version();
-  }
+  } else if (OB_FAIL(compaction_scn.convert_for_tx(tablet_replica.get_snapshot_version()))) {
+    LOG_WARN("failed to get tablet meta info", K(ret), K(compaction_scn), K(tenant_id), K(tablet_id), K(ls_id), K(src_addr));
+  } else {/*do nothing*/}
   return ret;
 }
 
 int ObStorageHAUtils::check_tablet_replica_checksum_(const uint64_t tenant_id, const common::ObTabletID &tablet_id,
-    const share::ObLSID &ls_id, const int64_t compaction_scn, common::ObISQLClient &sql_client)
+    const share::ObLSID &ls_id, const SCN &compaction_scn, common::ObISQLClient &sql_client)
 {
   int ret = OB_SUCCESS;
   ObArray<ObTabletReplicaChecksumItem> items;
@@ -88,13 +89,13 @@ int ObStorageHAUtils::check_tablet_replica_checksum_(const uint64_t tenant_id, c
     LOG_WARN("failed to init pair", K(ret), K(tablet_id), K(ls_id));
   } else if (OB_FAIL(pairs.push_back(pair))) {
     LOG_WARN("failed to push back", K(ret), K(pair));
-  } else if (OB_FAIL(ObTabletReplicaChecksumOperator::batch_get(tenant_id, pairs, sql_client, items))) {
+  } else if (OB_FAIL(ObTabletReplicaChecksumOperator::batch_get(tenant_id, pairs, compaction_scn, sql_client, items))) {
     LOG_WARN("failed to batch get replica checksum item", K(ret));
   } else {
     ObArray<share::ObTabletReplicaChecksumItem> filter_items;
     for (int64_t i = 0; OB_SUCC(ret) && i < items.count(); ++i) {
       const ObTabletReplicaChecksumItem &item = items.at(i);
-      if (item.snapshot_version_ == compaction_scn) {
+      if (item.compaction_scn_ == compaction_scn) {
         if (OB_FAIL(filter_items.push_back(item))) {
           LOG_WARN("failed to push back", K(ret), K(item));
         }

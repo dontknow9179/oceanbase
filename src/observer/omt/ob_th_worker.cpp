@@ -192,7 +192,7 @@ ObThWorker::Status ObThWorker::check_qtime_throttle()
           (get_query_start_time() - get_query_enqueue_time() >=
            static_cast<int64_t>(st_metrics.queue_time_ * 1000000L))) {
         st = WS_OUT_OF_THROTTLE;
-        LOG_WARN("query is throttled",
+        LOG_WARN_RET(OB_ERROR, "query is throttled",
                  "queue_time_threshold(s)", st_metrics.queue_time_,
                  "query_enqueue_time", get_query_enqueue_time(),
                  "query_start_time", get_query_start_time());
@@ -215,7 +215,7 @@ ObThWorker::Status ObThWorker::check_throttle()
          (curr_time - get_query_start_time() >=
           static_cast<int64_t>(st_metrics.rt_ * 1000000L))) {
         st = WS_OUT_OF_THROTTLE;
-        LOG_WARN("query is throttled",
+        LOG_WARN_RET(OB_ERR_UNEXPECTED, "query is throttled",
                  "rt_threshold(s)", st_metrics.rt_,
                  "query_start_time", get_query_start_time(),
                  "current_time", curr_time);
@@ -277,7 +277,7 @@ inline void ObThWorker::process_request(rpc::ObRequest &req)
   int ret = OB_SUCCESS;
   reset_sql_throttle_current_priority();
   ObDiagTenantGuard diag_guard(*this, tenant_? tenant_->id(): OB_SYS_TENANT_ID);
-  set_req_flag(true);
+  set_req_flag(&req);
 
   memtable::TLOCAL_NEED_WAIT_IN_LOCK_WAIT_MGR = false;
   MTL(memtable::ObLockWaitMgr*)->setup(req.get_lock_wait_node(), req.get_receive_timestamp());
@@ -332,7 +332,7 @@ inline void ObThWorker::process_request(rpc::ObRequest &req)
             get_allocator().used(),
             pm_hold);
   }
-  set_req_flag(false);
+  set_req_flag(NULL);
 }
 
 void ObThWorker::set_th_worker_thread_name(uint64_t tenant_id)
@@ -359,6 +359,7 @@ void ObThWorker::worker(int64_t &tenant_id, int64_t &req_recv_timestamp, int32_t
   int64_t req_end_time = 0;
   th_created();
 
+  ObTLTaGuard ta_guard(tenant_ != NULL? tenant_->id() : OB_SERVER_TENANT_ID);
   // Avoid adding and deleting entities from the root node for every request, the parameters are meaningless
   CREATE_WITH_TEMP_ENTITY(RESOURCE_OWNER, OB_SERVER_TENANT_ID) {
     auto *pm = common::ObPageManager::thread_local_instance();

@@ -26,6 +26,7 @@ namespace oceanbase
 {
 namespace blocksstable
 {
+
 /**
  * ---------------------------------------ObMacroBlockHandle----------------------------------------
  */
@@ -127,6 +128,7 @@ int ObMacroBlockHandle::async_read(const ObMacroBlockReadInfo &read_info)
     io_info.callback_ = read_info.io_callback_;
     io_info.fd_.first_id_ = read_info.macro_block_id_.first_id();
     io_info.fd_.second_id_ = read_info.macro_block_id_.second_id();
+    io_info.flag_.set_group_id(THIS_WORKER.get_group_id());
 
     io_info.flag_.set_read();
     if (OB_FAIL(ObIOManager::get_instance().aio_read(io_info, io_handle_))) {
@@ -153,6 +155,7 @@ int ObMacroBlockHandle::async_write(const ObMacroBlockWriteInfo &write_info)
     io_info.flag_ = write_info.io_desc_;
     io_info.fd_.first_id_ = macro_id_.first_id();
     io_info.fd_.second_id_ = macro_id_.second_id();
+    io_info.flag_.set_group_id(THIS_WORKER.get_group_id());
 
     io_info.flag_.set_write();
     if (OB_FAIL(ObIOManager::get_instance().aio_write(io_info, io_handle_))) {
@@ -268,7 +271,7 @@ void ObMacroBlocksHandle::reset()
 
     for (int64_t i = 0; i < macro_id_list_.count(); ++i) {
       if (OB_SUCCESS != (tmp_ret = OB_SERVER_BLOCK_MGR.dec_ref(macro_id_list_.at(i)))) {
-        LOG_ERROR("failed to dec macro block ref cnt", K(tmp_ret), "macro_id", macro_id_list_.at(i));
+        LOG_ERROR_RET(tmp_ret, "failed to dec macro block ref cnt", K(tmp_ret), "macro_id", macro_id_list_.at(i));
       }
     }
   }
@@ -285,5 +288,6 @@ int ObMacroBlocksHandle::reserve(const int64_t block_cnt)
   }
   return ret;
 }
+
 } // namespace blocksstable
 } // namespace oceanbase

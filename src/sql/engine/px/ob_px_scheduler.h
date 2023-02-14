@@ -27,6 +27,8 @@
 #include "sql/engine/px/datahub/components/ob_dh_rollup_key.h"
 #include "sql/engine/px/datahub/components/ob_dh_barrier.h"
 #include "sql/engine/px/datahub/components/ob_dh_range_dist_wf.h"
+#include "sql/engine/px/datahub/components/ob_dh_second_stage_reporting_wf.h"
+#include "sql/engine/px/datahub/components/ob_dh_opt_stats_gather.h"
 
 namespace oceanbase
 {
@@ -34,6 +36,7 @@ namespace sql
 {
 
 class ObPxCoordOp;
+class ObPxObDfoMgr;
 class ObPxRootDfoAction
 {
 public:
@@ -121,6 +124,9 @@ public:
   int on_piece_msg(ObExecContext &ctx, const ObDynamicSamplePieceMsg &pkt);
   int on_piece_msg(ObExecContext &ctx, const ObRollupKeyPieceMsg &pkt);
   int on_piece_msg(ObExecContext &ctx, const ObRDWFPieceMsg &pkt);
+  int on_piece_msg(ObExecContext &ctx, const ObInitChannelPieceMsg &pkt);
+  int on_piece_msg(ObExecContext &ctx, const ObReportingWFPieceMsg &pkt);
+  int on_piece_msg(ObExecContext &ctx, const ObOptStatsGatherPieceMsg &pkt);
   // end DATAHUB msg processing
 
   ObPxCoordInfo &coord_info_;
@@ -148,13 +154,18 @@ public:
 
   // root dfo 的调度特殊路径
   int on_dfo_pair_thread_inited(ObExecContext &ctx, ObDfo &child, ObDfo &parent);
-  static int mark_rpc_filter(ObExecContext &ctx);
+  static int mark_rpc_filter(ObExecContext &ctx,
+                             ObJoinFilterDataCtx &bf_ctx,
+                             int64_t &each_group_size);
   // begin DATAHUB msg processing
   int on_piece_msg(ObExecContext &ctx, const ObBarrierPieceMsg &pkt);
   int on_piece_msg(ObExecContext &ctx, const ObWinbufPieceMsg &pkt);
   int on_piece_msg(ObExecContext &ctx, const ObDynamicSamplePieceMsg &pkt);
   int on_piece_msg(ObExecContext &ctx, const ObRollupKeyPieceMsg &pkt);
   int on_piece_msg(ObExecContext &ctx, const ObRDWFPieceMsg &pkt);
+  int on_piece_msg(ObExecContext &ctx, const ObInitChannelPieceMsg &pkt);
+  int on_piece_msg(ObExecContext &ctx, const ObReportingWFPieceMsg &pkt);
+  int on_piece_msg(ObExecContext &ctx, const ObOptStatsGatherPieceMsg &pkt);
   // end DATAHUB msg processing
 private:
   int do_cleanup_dfo(ObDfo &dfo);
@@ -169,7 +180,6 @@ private:
   ObPxRootDfoAction &root_dfo_action_;
   ObDfoSchedulerBasic *scheduler_;
 };
-
 
 } // end namespace sql
 } // end namespace oceanbase

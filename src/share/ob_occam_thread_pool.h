@@ -200,7 +200,7 @@ public:
     is_inited_(false),
     is_stopped_(false) {}
   ~ObOccamThreadPool() { destroy(); }
-  int init(int64_t thread_num, int queue_size_square_of_2 = 14)
+  int init(int64_t thread_num, int64_t queue_size_square_of_2 = 14)
   {
     int ret = OB_SUCCESS;
     if (is_inited_) {
@@ -394,6 +394,7 @@ private:
       queue_size_(0),
       mask_value_(0),
       buffer_(nullptr),
+      lock_(common::ObLatchIds::THREAD_POOL_LOCK),
       head_(0),
       tail_(0) {}
     ~InnerTaskQueue() { destroy(); }

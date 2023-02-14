@@ -64,7 +64,7 @@ void SessionGuard::revert_session_()
 {
   if (nullptr != sess_ptr_) {
     if (OB_ISNULL(GCTX.session_mgr_)) {
-      DETECT_LOG(ERROR, "GCTX.session_mgr is NULL, session will leak", K_(sess_ptr));
+      DETECT_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "GCTX.session_mgr is NULL, session will leak", K_(sess_ptr));
     } else {
       GCTX.session_mgr_->revert_session(sess_ptr_);
     }
@@ -146,9 +146,7 @@ int ObTransDeadlockDetectorAdapter::kill_tx(const uint32_t sess_id)
   } else if (OB_FAIL(GCTX.session_mgr_->set_query_deadlocked(*session_info))) {
     DETECT_LOG(WARN, "set query dealocked failed", K(ret), K(sess_id), K(*session_info));
   } else {
-    session_info->reset_first_need_txn_stmt_type();
     session_info->reset_tx_variable();
-    session_info->set_early_lock_release(false);
     mgr->notify_deadlocked_session(sess_id);
     DETECT_LOG(INFO, "set query dealocked success in mysql mode", K(ret), K(sess_id), K(*session_info));
   }
@@ -461,7 +459,7 @@ int ObTransDeadlockDetectorAdapter::get_trans_start_time_and_scheduler_from_sess
     DETECT_LOG(ERROR, "get session failed", PRINT_WRAPPER);
   } else if (OB_ISNULL(guard->get_tx_desc())) {
     ret = OB_BAD_NULL_ERROR;
-    DETECT_LOG(ERROR, "desc on session is NULL", PRINT_WRAPPER);
+    DETECT_LOG(WARN, "desc on session is NULL", PRINT_WRAPPER);
   } else if (guard->get_tx_desc()->get_addr() != GCTX.self_addr()) {
     ret = OB_ERR_UNEXPECTED;
     DETECT_LOG(ERROR, "this not happened on scheduler", PRINT_WRAPPER, K(guard->get_tx_desc()->get_addr()));
@@ -626,12 +624,12 @@ int ObTransDeadlockDetectorAdapter::maintain_deadlock_info_when_end_stmt(sql::Ob
   } else if (is_rollback) {// statment is failed, maybe will try again, check if need register to deadlock detector
     if (session->get_query_timeout_ts() < ObClockGenerator::getCurrentTime()) {
       DETECT_LOG(INFO, "query timeout, no need register to deadlock", KR(ret), K(desc->tid()));
-    } else if (OB_FAIL(desc->get_conflict_txs(conflict_txs))) {
+    } else if (OB_FAIL(desc->fetch_conflict_txs(conflict_txs))) {
       DETECT_LOG(WARN, "fail to get conflict txs from desc", KR(ret), K(desc->tid()));
     } else if (conflict_txs.empty()) {
       // no row conflicted, no need register to deadlock
     } else if (OB_FAIL(register_remote_execution_or_replace_conflict_trans_ids(desc->tid(),
-                                                                               desc->get_session_id(),
+                                                                               session->get_sessid(),
                                                                                conflict_txs))) {
       DETECT_LOG(WARN, "register or replace list failed", KR(ret), K(desc->tid()));
     } else {
@@ -749,7 +747,7 @@ int ObTransDeadlockDetectorAdapter::autonomous_register_to_deadlock(const ObTran
     DETECT_LOG(ERROR, "tenant deadlock detector mgr is null", PRINT_WRAPPER);
   } else if (OB_FAIL(MTL(ObDeadLockDetectorMgr*)->register_key(last_trans_id,
                                                   [](const common::ObIArray<ObDetectorInnerReportInfo> &,
-                                                    const int64_t) { DETECT_LOG(ERROR, "should not kill inner node");
+                                                    const int64_t) { DETECT_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "should not kill inner node");
                                                                       return common::OB_ERR_UNEXPECTED; },
                                                   [last_trans_id](ObDetectorUserReportInfo& report_info) {
                                                     ObSharedGuard<char> ptr;
@@ -761,7 +759,7 @@ int ObTransDeadlockDetectorAdapter::autonomous_register_to_deadlock(const ObTran
                                                       buffer[63] = '\0';
                                                       ptr.assign((char*)buffer, [](char* p){ ob_free(p); });
                                                     } else {
-                                                      DETECT_LOG(WARN, "alloc memory failed");
+                                                      DETECT_LOG_RET(WARN, OB_ALLOCATE_MEMORY_FAILED, "alloc memory failed");
                                                       ptr.assign((char*)"inner visitor", [](char*){});
                                                     }
                                                     report_info.set_visitor(ptr);

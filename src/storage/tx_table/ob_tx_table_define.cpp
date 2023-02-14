@@ -274,7 +274,7 @@ int64_t ObTxCtxTableMeta::get_serialize_size_() const
 DEF_TO_STRING(ObCommitVersionsArray::Node)
 {
   int64_t pos = 0;
-  J_KV(K_(start_log_ts),
+  J_KV(K_(start_scn),
        K_(commit_version));
   return pos;
 }
@@ -289,7 +289,9 @@ DEF_TO_STRING(ObCommitVersionsArray)
 int ObCommitVersionsArray::serialize(char *buf, const int64_t buf_len, int64_t &pos) const
 {
   int ret = OB_SUCCESS;
+
   const int64_t len = get_serialize_size_();
+
   if (OB_UNLIKELY(OB_ISNULL(buf) || buf_len <= 0 || pos > buf_len)) {
     ret = OB_INVALID_ARGUMENT;
     STORAGE_LOG(WARN, "serialize ObCommitVersionsArray failed.", KR(ret), KP(buf), K(buf_len),
@@ -312,20 +314,24 @@ int ObCommitVersionsArray::deserialize(const char *buf, const int64_t data_len, 
   int ret = OB_SUCCESS;
   int64_t version = 0;
   int64_t len = 0;
+  array_.reuse();
 
-  if (OB_FAIL(serialization::decode_vi64(buf, data_len, pos, &version))) {
+  if (OB_UNLIKELY(nullptr == buf || data_len <= 0 || pos > data_len)) {
+    ret = OB_INVALID_ARGUMENT;
+    STORAGE_LOG(WARN, "invalid arguments.", KP(buf), K(data_len), K(ret));
+  } else if (OB_FAIL(serialization::decode_vi64(buf, data_len, pos, &version))) {
     STORAGE_LOG(WARN, "decode version fail", K(version), K(data_len), K(pos), K(ret));
-  } else if (OB_FAIL(serialization::decode_vi64(buf, data_len, pos, &len))) {
-    STORAGE_LOG(WARN, "decode data len fail", K(len), K(data_len), K(pos), K(ret));
   } else if (version != UNIS_VERSION) {
     ret = OB_VERSION_NOT_MATCH;
     STORAGE_LOG(WARN, "object version mismatch", K(ret), K(version));
+  }  else if (OB_FAIL(serialization::decode_vi64(buf, data_len, pos, &len))) {
+    STORAGE_LOG(WARN, "decode data len fail", K(len), K(data_len), K(pos), K(ret));
   } else if (OB_UNLIKELY(len < 0)) {
     ret = OB_ERR_UNEXPECTED;
-    STORAGE_LOG(WARN, "can't decode object with negative length", K(len));
+    STORAGE_LOG(WARN, "can't decode object with negative length", KR(ret), K(len));
   } else if (OB_UNLIKELY(data_len < len + pos)) {
     ret = OB_DESERIALIZE_ERROR;
-    STORAGE_LOG(WARN, "buf length not correct", K(len), K(pos), K(data_len));
+    STORAGE_LOG(WARN, "buf length not correct", KR(ret), K(len), K(pos), K(data_len));
   } else {
     int64_t original_pos = pos;
     pos = 0;
@@ -335,6 +341,7 @@ int ObCommitVersionsArray::deserialize(const char *buf, const int64_t data_len, 
     }
     pos += original_pos;
   }
+
   return ret;
 }
 
@@ -352,7 +359,7 @@ int ObCommitVersionsArray::serialize_(char *buf, const int64_t buf_len, int64_t 
 {
   int ret = OB_SUCCESS;
   for (int i = 0; OB_SUCC(ret) && i < array_.count(); i++) {
-    LST_DO_CODE(OB_UNIS_ENCODE, array_.at(i).start_log_ts_, array_.at(i).commit_version_);
+    LST_DO_CODE(OB_UNIS_ENCODE, array_.at(i).start_scn_, array_.at(i).commit_version_);
   }
   return ret;
 }
@@ -363,7 +370,7 @@ int ObCommitVersionsArray::deserialize_(const char *buf, const int64_t data_len,
 
   ObCommitVersionsArray::Node node;
   while (OB_SUCC(ret) && pos < data_len) {
-    LST_DO_CODE(OB_UNIS_DECODE, node.start_log_ts_, node.commit_version_);
+    LST_DO_CODE(OB_UNIS_DECODE, node.start_scn_, node.commit_version_);
     array_.push_back(node);
   }
 
@@ -374,7 +381,7 @@ int64_t ObCommitVersionsArray::get_serialize_size_() const
 {
   int64_t len = 0;
   for (int i = 0; i < array_.count(); i++) {
-    LST_DO_CODE(OB_UNIS_ADD_LEN, array_.at(i).start_log_ts_, array_.at(i).commit_version_);
+    LST_DO_CODE(OB_UNIS_ADD_LEN, array_.at(i).start_scn_, array_.at(i).commit_version_);
   }
   return len;
 }
@@ -383,16 +390,17 @@ bool ObCommitVersionsArray::is_valid()
 {
   bool bool_ret = true;
   for (int i = 0; i < array_.count() - 1; i++) {
-    if (array_.at(i).start_log_ts_ > array_.at(i + 1).start_log_ts_
-        || array_.at(i).start_log_ts_ > array_.at(i).commit_version_) {
+    if (!array_.at(i).start_scn_.is_valid() ||
+        !array_.at(i).commit_version_.is_valid() ||
+        array_.at(i).start_scn_ > array_.at(i + 1).start_scn_ ||
+        array_.at(i).start_scn_ > array_.at(i).commit_version_) {
       bool_ret = false;
-      STORAGE_LOG(ERROR, "this commit version array is invalid", K(array_.at(i)),
+      STORAGE_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "this commit version array is invalid", K(array_.at(i)),
                   K(array_.at(i + 1)));
     }
   }
   return bool_ret;
 }
-
 
 } // end namespace transaction
 } // end namespace oceanbase

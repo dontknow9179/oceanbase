@@ -14,6 +14,7 @@
 
 #define protected public
 #define private public
+#define UNITTEST
 
 #include <vector>
 #include "storage/meta_mem/ob_tenant_meta_mem_mgr.h"
@@ -34,6 +35,14 @@ using namespace transaction;
 using namespace storage;
 using namespace blocksstable;
 using namespace share;
+
+namespace storage
+{
+int64_t ObTenantMetaMemMgr::cal_adaptive_bucket_num()
+{
+  return 1000;
+}
+}
 
 namespace unittest
 {
@@ -64,13 +73,8 @@ public:
       log_handler_(),
       tablet_id_(LS_TX_DATA_TABLET),
       ls_id_(1),
-      tenant_id_(1001),
-      freezer_((ObLSWRSHandler *)(0x1),
-               (ObLSTxService *)(0x1),
-               (ObLSTabletService *)(0x1),
-               (checkpoint::ObDataCheckpoint *)(0x1),
-               (logservice::ObILogHandler *)(0x1),
-               ls_id_),
+      tenant_id_(1),
+      freezer_(&ls_),
       t3m_(common::OB_SERVER_TENANT_ID),
       mt_mgr_(nullptr),
       ctx_mt_mgr_(nullptr),
@@ -95,7 +99,7 @@ protected:
   virtual void SetUp() override
   {
     ObTxPalfParam palf_param((logservice::ObLogHandler *)(0x01));
-    freezer_.init(&ls_loop_worker_, &ls_tx_service_, &ls_tablet_service_, &ls_data_checkpoint_, &log_handler_, ls_id_);
+    freezer_.init(&ls_);
     EXPECT_EQ(OB_SUCCESS, t3m_.init());
     EXPECT_EQ(OB_SUCCESS,
               ls_tx_ctx_mgr_.init(tenant_id_, /*tenant_id*/
@@ -136,7 +140,7 @@ protected:
     mt_mgr_ = NULL;
     ctx_mt_mgr_ = NULL;
 
-    ASSERT_EQ(1, ref_count_);
+    ASSERT_EQ(0, ref_count_);
 
     tenant_base_.destroy();
     ObTenantEnv::set_tenant(nullptr);
@@ -160,7 +164,7 @@ int64_t TestTxCtxTable::ref_count_;
 TEST_F(TestTxCtxTable, test_tx_ctx_memtable_mgr)
 {
   EXPECT_EQ(0, TestTxCtxTable::ref_count_);
-  EXPECT_EQ(OB_SUCCESS, mt_mgr_->create_memtable(0, /*last_replay_log_ts*/
+  EXPECT_EQ(OB_SUCCESS, mt_mgr_->create_memtable(SCN::min_scn(), /*last_replay_log_ts*/
                                                  0  /*schema_version*/));
 
   EXPECT_EQ(1, TestTxCtxTable::ref_count_);
@@ -227,20 +231,22 @@ TEST_F(TestTxCtxTable, test_tx_ctx_memtable_mgr)
   ObTransID id1(1);
   ObLSID ls_id(1);
   static ObPartTransCtx ctx1;
-  ctx1.tenant_id_ = 1001;
+  ctx1.tenant_id_ = 1;
   ctx1.trans_id_ = id1;
   ctx1.is_inited_ = true;
   ctx1.ls_id_ = ls_id;
+  ctx1.exec_info_.max_applying_log_ts_.convert_from_ts(1);
   ObTxData data1;
   // ctx1.tx_data_ = &data1;
   ctx1.ctx_tx_data_.test_init(data1, &ls_tx_ctx_mgr_);
 
   ObTransID id2(2);
   static ObPartTransCtx ctx2;
-  ctx2.tenant_id_ = 1001;
+  ctx2.tenant_id_ = 1;
   ctx2.trans_id_ = id2;
   ctx2.is_inited_ = true;
   ctx2.ls_id_ = ls_id;
+  ctx2.exec_info_.max_applying_log_ts_.convert_from_ts(2);
   ObTxData data2;
   // ctx2.tx_data_ = &data2;
   ctx2.ctx_tx_data_.test_init(data2, &ls_tx_ctx_mgr_);
@@ -254,7 +260,7 @@ TEST_F(TestTxCtxTable, test_tx_ctx_memtable_mgr)
   ObSliceAlloc slice_allocator;
   ObMemAttr attr;
   attr.tenant_id_ = MTL_ID();
-  slice_allocator.init(TX_DATA_SLICE_SIZE, OB_MALLOC_NORMAL_BLOCK_SIZE, common::default_blk_alloc, attr);
+  slice_allocator.init(sizeof(ObTxData), OB_MALLOC_NORMAL_BLOCK_SIZE, common::default_blk_alloc, attr);
 
   ObTxPalfParam palf_param((logservice::ObLogHandler *)(0x01));
 

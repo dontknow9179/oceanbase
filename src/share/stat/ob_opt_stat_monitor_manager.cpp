@@ -145,14 +145,14 @@ void ObOptStatMonitorManager::destroy()
     inited_ = false;
     for (auto iter = column_usage_maps_.begin(); iter != column_usage_maps_.end(); ++iter) {
       if (OB_ISNULL(iter->second)) {
-        BACKTRACE(ERROR, true, "column usage map is null");
+        BACKTRACE_RET(ERROR, OB_ERR_UNEXPECTED, true, "column usage map is null");
       } else {
         iter->second->destroy();
       }
     }
     for (auto iter = dml_stat_maps_.begin(); iter != dml_stat_maps_.end(); ++iter) {
       if (OB_ISNULL(iter->second)) {
-        BACKTRACE(ERROR, true, "dml stats map is null");
+        BACKTRACE_RET(ERROR, OB_ERR_UNEXPECTED, true, "dml stats map is null");
       } else {
         iter->second->destroy();
       }
@@ -249,7 +249,7 @@ int ObOptStatMonitorManager::update_local_cache(uint64_t tenant_id,
         ret = OB_ALLOCATE_MEMORY_FAILED;
         LOG_WARN("alloc memory failed", K(ret));
       } else if (OB_FALSE_IT(col_map = new(buff)ColumnUsageMap())) {
-      } else if (OB_FAIL(col_map->create(10000, "ColUsagHashMap", "ColUsagHashMap", tenant_id))) {
+      } else if (OB_FAIL(col_map->create(10000, "ColUsagHashMap", "ColUsagHashMap", OB_SERVER_TENANT_ID))) {
         LOG_WARN("failed to create column usage map", K(ret));
       } else if (OB_FAIL(column_usage_maps_.set_refactored(tenant_id, col_map))) {
         // set refacter failed, may created by other thread
@@ -294,7 +294,7 @@ int ObOptStatMonitorManager::update_local_cache(uint64_t tenant_id, ObOptDmlStat
         ret = OB_ALLOCATE_MEMORY_FAILED;
         LOG_WARN("alloc memory failed", K(ret));
       } else if (OB_FALSE_IT(dml_stat_map = new(buff)DmlStatMap())) {
-      } else if (OB_FAIL(dml_stat_map->create(10000, "DmlStatsHashMap", "DmlStatsHashMap", tenant_id))) {
+      } else if (OB_FAIL(dml_stat_map->create(10000, "DmlStatsHashMap", "DmlStatsHashMap", OB_SERVER_TENANT_ID))) {
         LOG_WARN("failed to create column usage map", K(ret));
       } else if (OB_FAIL(dml_stat_maps_.set_refactored(tenant_id, dml_stat_map))) {
         // set refacter failed, may created by other thread
@@ -721,7 +721,7 @@ int ObOptStatMonitorManager::SwapMapAtomicOp::operator() (common::hash::HashMapP
     } else if (NULL == (col_map = new(buff)ColumnUsageMap())) {
       ret = OB_NOT_INIT;
       LOG_WARN("fail to constructor column usage map", K(ret));
-    } else if (OB_FAIL(col_map->create(10000, "ColUsagHashMap", "ColUsagHashMap", entry.first))) {
+    } else if (OB_FAIL(col_map->create(10000, "ColUsagHashMap", "ColUsagHashMap", OB_SERVER_TENANT_ID))) {
       LOG_WARN("failed to create column usage map", K(ret));
     } else {
       column_usage_map_ = entry.second;
@@ -757,7 +757,7 @@ int ObOptStatMonitorManager::SwapMapAtomicOp::operator() (common::hash::HashMapP
     } else if (NULL == (dml_stat_map = new(buff)DmlStatMap())) {
       ret = OB_NOT_INIT;
       LOG_WARN("fail to constructor DmlStatMap", K(ret));
-    } else if (OB_FAIL(dml_stat_map->create(10000, "DmlStatMap", "DmlStatMap", entry.first))) {
+    } else if (OB_FAIL(dml_stat_map->create(10000, "DmlStatMap", "DmlStatMap", OB_SERVER_TENANT_ID))) {
       LOG_WARN("failed to create column usage map", K(ret));
     } else {
       dml_stat_map_ = entry.second;
@@ -929,10 +929,17 @@ int ObOptStatMonitorManager::clean_useless_dml_stat_info(uint64_t tenant_id)
   const char* all_table_name = NULL;
   if (OB_FAIL(ObSchemaUtils::get_all_table_name(tenant_id, all_table_name))) {
     LOG_WARN("failed to get all table name", K(ret));
-  } else if (OB_FAIL(delete_sql.append_fmt("delete from %s m where not exists " \
-            "(select 1 from %s t where t.table_id = m.table_id and t.tenant_id = m.tenant_id) "\
-            " and table_id > %ld;",
-            share::OB_ALL_MONITOR_MODIFIED_TNAME, all_table_name, OB_MAX_INNER_TABLE_ID))) {
+  } else if (OB_FAIL(delete_sql.append_fmt("DELETE FROM %s m WHERE (NOT EXISTS (SELECT 1 " \
+            "FROM %s t, %s db WHERE t.tenant_id = db.tenant_id AND t.database_id = db.database_id "\
+            "AND t.table_id = m.table_id AND t.tenant_id = m.tenant_id AND db.database_name != '__recyclebin') "\
+            "OR (tenant_id, table_id, tablet_id) IN (SELECT m.tenant_id, m.table_id, m.tablet_id FROM "\
+            "%s m, %s t WHERE t.table_id = m.table_id AND t.tenant_id = m.tenant_id AND t.part_level > 0 "\
+            "AND NOT EXISTS (SELECT 1 FROM %s p WHERE  p.table_id = m.table_id AND p.tenant_id = m.tenant_id AND p.tablet_id = m.tablet_id) "\
+            "AND NOT EXISTS (SELECT 1 FROM %s sp WHERE  sp.table_id = m.table_id AND sp.tenant_id = m.tenant_id AND sp.tablet_id = m.tablet_id))) "\
+            "AND table_id > %ld;",
+            share::OB_ALL_MONITOR_MODIFIED_TNAME, all_table_name, share::OB_ALL_DATABASE_TNAME,
+            share::OB_ALL_MONITOR_MODIFIED_TNAME, all_table_name, share::OB_ALL_PART_TNAME,
+            share::OB_ALL_SUB_PART_TNAME, OB_MAX_INNER_TABLE_ID))) {
     LOG_WARN("failed to append fmt", K(ret));
   } else if (OB_FAIL(mysql_proxy_->write(tenant_id, delete_sql.ptr(), affected_rows))) {
     LOG_WARN("failed to execute sql", K(ret), K(delete_sql));

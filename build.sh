@@ -140,7 +140,7 @@ function do_build
 function do_clean
 {
     echo_log "cleaning..."
-    find . -maxdepth 1 -type d -name 'build_*' | xargs rm -rf
+    find . -maxdepth 1 -type d -name 'build_*' | grep -v 'build_ccls' | xargs rm -rf
 }
 
 # build - configurate project and prepare to compile, by calling make
@@ -168,6 +168,9 @@ function build
         do_build "$@" -DCMAKE_BUILD_TYPE=Debug -DOB_USE_LLD=$LLD_OPTION -DOB_BUILD_CCLS=ON
         # build soft link for ccls
         ln -sf ${TOPDIR}/build_ccls/compile_commands.json ${TOPDIR}/compile_commands.json
+        ;;
+      xperf)
+        do_build "$@" -DCMAKE_BUILD_TYPE=RelWithDebInfo -DENABLE_AUTO_FDO=ON -DENABLE_THIN_LTO=ON -DOB_USE_LLD=$LLD_OPTION
         ;;
       xdebug_asan)
         do_build "$@" -DCMAKE_BUILD_TYPE=Debug -DOB_USE_LLD=$LLD_OPTION -DOB_USE_ASAN=$ASAN_OPTION

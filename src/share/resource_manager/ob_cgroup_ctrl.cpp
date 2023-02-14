@@ -18,6 +18,7 @@
 #include "lib/oblog/ob_log.h"
 #include "share/ob_errno.h"
 #include "share/config/ob_server_config.h"
+#include "share/io/ob_io_manager.h"
 #include "share/resource_manager/ob_resource_plan_info.h"
 #include "share/resource_manager/ob_resource_manager.h"
 #include "share/resource_manager/ob_cgroup_ctrl.h"
@@ -36,6 +37,28 @@ ObCgSet ObCgSet::instance_;
 }
 }
 
+//集成IO参数
+int OBGroupIOInfo::init(int64_t min_percent, int64_t max_percent, int64_t weight_percent)
+{
+  int ret = OB_SUCCESS;
+  if (min_percent < 0 || min_percent > 100 ||
+      max_percent < 0 || max_percent > 100 ||
+      weight_percent < 0 || weight_percent > 100 ||
+      min_percent > max_percent) {
+    ret = OB_INVALID_CONFIG;
+    LOG_WARN("invalid io config", K(ret), K(min_percent), K(max_percent), K(weight_percent));
+  } else {
+    min_percent_ = min_percent;
+    max_percent_ = max_percent;
+    weight_percent_ = weight_percent;
+  }
+  return ret;
+}
+bool OBGroupIOInfo::is_valid() const
+{
+  return min_percent_ >= 0 && max_percent_ >= min_percent_ && max_percent_ <= 100 && weight_percent_ >= 0 && weight_percent_ <= 100;
+}
+
 // 创建cgroup初始目录结构，将所有线程加入other组
 int ObCgroupCtrl::init()
 {
@@ -43,7 +66,11 @@ int ObCgroupCtrl::init()
   if (GCONF.enable_cgroup == false) {
     // not init cgroup when config set to false
   } else if (OB_FAIL(init_cgroup_root_dir_(root_cgroup_))) {
-    LOG_WARN("init cgroup dir failed", K(ret), K(root_cgroup_));
+	  if (OB_FILE_NOT_EXIST == ret) {
+      LOG_WARN("init cgroup dir failed", K(ret), K(root_cgroup_));
+    } else {
+      LOG_ERROR("init cgroup dir failed", K(ret), K(root_cgroup_));
+    }
   } else if (OB_FAIL(init_cgroup_dir_(other_cgroup_))) {
     LOG_WARN("init other cgroup dir failed", K(ret), K_(other_cgroup));
   } else {
@@ -170,7 +197,7 @@ int ObCgroupCtrl::get_group_path(
   } else if (OB_FAIL(get_group_info_by_group_id(tenant_id, group_id, g_name))){
     LOG_WARN("get group_name by id failed", K(group_id), K(ret));
   } else {
-    group_name = const_cast<char*>(g_name.get_group_name().ptr());
+    group_name = const_cast<char*>(g_name.get_value().ptr());
     snprintf(group_path, path_bufsize, "%s/tenant_%04lu/%s",
           root_cgroup_, tenant_id, group_name);
   }
@@ -283,7 +310,7 @@ int ObCgroupCtrl::get_group_info_by_group_id(const uint64_t tenant_id,
   int ret = OB_SUCCESS;
   ObResourceMappingRuleManager &rule_mgr = G_RES_MGR.get_mapping_rule_mgr();
   if (OB_FAIL(rule_mgr.get_group_name_by_id(tenant_id, group_id, group_name))) {
-    LOG_WARN("fail get group name", K(group_name));
+    LOG_WARN("fail get group name", K(tenant_id), K(group_id), K(group_name));
   }
   return ret;
 }
@@ -300,6 +327,22 @@ int ObCgroupCtrl::remove_thread_from_cgroup(const pid_t tid, const uint64_t tena
     LOG_WARN("remove tid from cgroup failed", K(ret), K(task_path), K(tid_value), K(tenant_id));
   } else {
     LOG_INFO("remove tid from cgroup success", K(task_path), K(tid_value), K(tenant_id));
+  }
+  return ret;
+}
+
+int ObCgroupCtrl::add_thread_to_group(const pid_t tid,
+                                      const uint64_t tenant_id,
+                                      const uint64_t group_id)
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(!is_valid_tenant_id(tenant_id))) {
+    ret = OB_INVALID_CONFIG;
+    LOG_WARN("invalid config", K(ret), K(tenant_id));
+  } else if (OB_FAIL(add_thread_to_cgroup(tid, tenant_id, group_id))) {
+    LOG_WARN("fail to add thread to group", K(ret), K(tid), K(group_id), K(tenant_id));
+  } else {
+    LOG_INFO("set backup pid to group success", K(tenant_id), K(group_id), K(tid));
   }
   return ret;
 }
@@ -523,7 +566,7 @@ int ObCgroupCtrl::get_cpu_usage(const uint64_t tenant_id, int32_t &cpu_usage)
   if (0 == last_usage_check_time_) {
     last_cpu_usage_ = cur_usage;
   } else if (cur_time - last_usage_check_time_ > 1000000) {
-    cpu_usage = (cur_usage - last_cpu_usage_) / (cur_time - last_usage_check_time_);
+    cpu_usage = static_cast<int32_t>(cur_usage - last_cpu_usage_) / (cur_time - last_usage_check_time_);
   }
 
   return ret;
@@ -543,6 +586,127 @@ int ObCgroupCtrl::get_cpu_time(const uint64_t tenant_id, int64_t &cpu_time)
   } else {
     usage_value[VALUE_BUFSIZE] = '\0';
     cpu_time = std::stoull(usage_value) / 1000;
+  }
+  return ret;
+}
+
+int ObCgroupCtrl::set_group_iops(const uint64_t tenant_id,
+                                 const int level, // UNUSED
+                                 const int64_t group_id,
+                                 const OBGroupIOInfo &group_io)
+{
+  int ret = OB_SUCCESS;
+  UNUSED(level);
+
+  ObRefHolder<ObTenantIOManager> tenant_holder;
+  if (OB_UNLIKELY(!is_valid_tenant_id(tenant_id))) {
+    ret = OB_INVALID_CONFIG;
+    LOG_WARN("invalid config", K(ret), K(tenant_id));
+  } else if (OB_FAIL(OB_IO_MANAGER.get_tenant_io_manager(tenant_id, tenant_holder))) {
+    LOG_WARN("get tenant io manager failed", K(ret), K(tenant_id));
+  } else if (OB_FAIL(tenant_holder.get_ptr()->modify_io_config(group_id,
+                                                               group_io.min_percent_,
+                                                               group_io.max_percent_,
+                                                               group_io.weight_percent_))) {
+    LOG_WARN("modify consumer group iops failed", K(ret), K(group_id), K(tenant_id), K(group_id));
+  }
+  return ret;
+}
+
+int ObCgroupCtrl::reset_all_group_iops(const uint64_t tenant_id,
+                                       const int level) // UNUSED
+{
+  int ret = OB_SUCCESS;
+  UNUSED(level);
+
+  ObRefHolder<ObTenantIOManager> tenant_holder;
+  // 删除plan, IO层代表对应的所有group资源为0,0,0, 但group对应的数据结构不会被释放以防用户后续复用
+  if (OB_UNLIKELY(!is_valid_tenant_id(tenant_id))) {
+    ret = OB_INVALID_CONFIG;
+    LOG_WARN("invalid config", K(ret), K(tenant_id));
+  } else if (OB_FAIL(OB_IO_MANAGER.get_tenant_io_manager(tenant_id, tenant_holder))) {
+    LOG_WARN("get tenant io manager failed", K(ret), K(tenant_id));
+  } else if (OB_FAIL(tenant_holder.get_ptr()->reset_all_group_config())) {
+    LOG_WARN("reset consumer group iops failed", K(ret), K(tenant_id));
+  } else {
+    LOG_INFO("group iops control has reset, delete cur plan success", K(tenant_id));
+  }
+  return ret;
+}
+
+int ObCgroupCtrl::reset_group_iops(const uint64_t tenant_id,
+                                   const int level, // UNUSED
+                                   const common::ObString &consumer_group)
+{
+  int ret = OB_SUCCESS;
+  UNUSED(level);
+
+  uint64_t group_id = 0;
+  share::ObGroupName group_name;
+  group_name.set_value(consumer_group);
+  ObResourceMappingRuleManager &rule_mgr = G_RES_MGR.get_mapping_rule_mgr();
+  ObRefHolder<ObTenantIOManager> tenant_holder;
+
+  // 删除directive, IO层代表对应的group资源为0,0,0, 但group对应的数据结构不会被释放以防用户后续复用
+  if (OB_UNLIKELY(!is_valid_tenant_id(tenant_id))) {
+    ret = OB_INVALID_CONFIG;
+    LOG_WARN("invalid config", K(ret), K(tenant_id));
+  } else if (OB_FAIL(rule_mgr.get_group_id_by_name(tenant_id, group_name, group_id))) {
+    if (OB_HASH_NOT_EXIST == ret) {
+      //创建directive后立刻删除，可能还没有被刷到存储层或plan未生效，此时不再进行后续操作
+      ret = OB_SUCCESS;
+      LOG_INFO("delete directive success with no_releated_io_module", K(consumer_group), K(tenant_id));
+    } else {
+      LOG_WARN("fail get group id", K(ret), K(group_id), K(group_name));
+    }
+  } else if (group_id < GROUP_START_ID) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("invalid group id", K(ret), K(group_id), K(group_name));
+  } else if (OB_FAIL(OB_IO_MANAGER.get_tenant_io_manager(tenant_id, tenant_holder))) {
+    LOG_WARN("get tenant io manager failed", K(ret), K(tenant_id));
+  } else if (OB_FAIL(tenant_holder.get_ptr()->reset_consumer_group_config(group_id))) {
+    LOG_WARN("reset consumer group iops failed", K(ret), K(group_id), K(tenant_id), K(group_id));
+  } else {
+    LOG_INFO("group iops control has reset, delete directive success", K(consumer_group), K(tenant_id), K(group_id));
+  }
+  return ret;
+}
+
+int ObCgroupCtrl::delete_group_iops(const uint64_t tenant_id,
+                                    const int level, // UNUSED
+                                    const common::ObString &consumer_group)
+{
+  int ret = OB_SUCCESS;
+  UNUSED(level);
+
+  uint64_t group_id = 0;
+  share::ObGroupName group_name;
+  group_name.set_value(consumer_group);
+  ObResourceMappingRuleManager &rule_mgr = G_RES_MGR.get_mapping_rule_mgr();
+  if (OB_UNLIKELY(!is_valid_tenant_id(tenant_id))) {
+    ret = OB_INVALID_CONFIG;
+    LOG_WARN("invalid config", K(ret), K(tenant_id));
+  } else if (OB_FAIL(rule_mgr.get_group_id_by_name(tenant_id, group_name, group_id))) {
+    if (OB_HASH_NOT_EXIST == ret) {
+      //创建group后立刻删除，可能还没有被刷到存储层或plan未生效，此时不再进行后续操作
+      ret = OB_SUCCESS;
+      LOG_INFO("delete group success with no_releated_io_module", K(consumer_group), K(tenant_id));
+    } else {
+      LOG_WARN("fail get group id", K(ret), K(group_id), K(group_name));
+    }
+  } else if (group_id < GROUP_START_ID) {
+    //OTHER_GROUPS and all cannot be deleted
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("invalid group id", K(ret), K(group_id), K(group_name));
+  } else {
+    ObRefHolder<ObTenantIOManager> tenant_holder;
+    if (OB_FAIL(OB_IO_MANAGER.get_tenant_io_manager(tenant_id, tenant_holder))) {
+      LOG_WARN("get tenant io manager failed", K(ret), K(tenant_id));
+    } else if (OB_FAIL(tenant_holder.get_ptr()->delete_consumer_group_config(group_id))) {
+      LOG_WARN("stop group iops control failed", K(ret), K(tenant_id), K(group_id));
+    } else {
+      LOG_INFO("stop group iops_ctrl success when delete group", K(consumer_group), K(tenant_id), K(group_id));
+    }
   }
   return ret;
 }
@@ -608,14 +772,14 @@ int ObCgroupCtrl::write_string_to_file_(const char *filename, const char *conten
 {
   int ret = OB_SUCCESS;
   int fd = -1;
-  int tmp_ret = -1;
+  int64_t write_size = -1;
   if ((fd = ::open(filename, O_WRONLY)) < 0) {
     ret = OB_IO_ERROR;
     LOG_WARN("open file error", K(filename), K(errno), KERRMSG, K(ret));
-  } else if ((tmp_ret = write(fd, content, strlen(content))) < 0) {
+  } else if ((write_size = write(fd, content, static_cast<int32_t>(strlen(content)))) < 0) {
     ret = OB_IO_ERROR;
     LOG_WARN("write file error",
-        K(filename), K(content), K(ret), K(errno), KERRMSG, K(ret));
+        K(filename), K(content), K(ret), K(errno), KERRMSG);
   } else {
     // do nothing
   }
@@ -631,11 +795,11 @@ int ObCgroupCtrl::get_string_from_file_(const char *filename, char content[VALUE
 {
   int ret = OB_SUCCESS;
   int fd = -1;
-  int tmp_ret = -1;
+  int64_t read_size = -1;
   if ((fd = ::open(filename, O_RDONLY)) < 0) {
     ret = OB_IO_ERROR;
     LOG_WARN("open file error", K(filename), K(errno), KERRMSG, K(ret));
-  } else if ((tmp_ret = read(fd, content, VALUE_BUFSIZE)) < 0) {
+  } else if ((read_size = read(fd, content, VALUE_BUFSIZE)) < 0) {
     ret = OB_IO_ERROR;
     LOG_WARN("read file error",
         K(filename), K(content), K(ret), K(errno), KERRMSG, K(ret));

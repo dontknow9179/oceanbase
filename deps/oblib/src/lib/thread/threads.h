@@ -54,6 +54,7 @@ class Threads
 public:
   explicit Threads(int64_t n_threads = 1)
       : n_threads_(n_threads),
+        init_threads_(n_threads),
         threads_(nullptr),
         stack_size_(global_thread_stack_size),
         stop_(true),
@@ -81,6 +82,7 @@ public:
   int do_set_thread_count(int64_t n_threads);
   int set_thread_count(int64_t n_threads);
   int inc_thread_count(int64_t inc = 1);
+  int thread_recycle();
 
   int init();
   // IRunWrapper 用于创建多租户线程时指定租户上下文
@@ -116,11 +118,13 @@ protected:
   bool &has_set_stop() { return stop_; }
   int64_t get_thread_count() const { return n_threads_; }
   uint64_t get_thread_idx() const { return thread_idx_; }
+  void set_thread_idx(int64_t idx) { thread_idx_ = idx; }
 
 private:
   virtual void run(int64_t idx);
   virtual void run1() {}
 
+  int do_thread_recycle();
   /// \brief Create thread with start entry \c entry.
   int create_thread(Thread *&thread, std::function<void()> entry);
 
@@ -130,6 +134,7 @@ private:
 private:
   static thread_local uint64_t thread_idx_;
   int64_t n_threads_;
+  int64_t init_threads_;
   Thread **threads_;
   int64_t stack_size_;
   bool stop_;

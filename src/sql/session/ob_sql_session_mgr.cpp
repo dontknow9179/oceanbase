@@ -27,7 +27,8 @@
 #include "observer/ob_server_struct.h"
 #include "sql/monitor/ob_security_audit_utils.h"
 #include "sql/session/ob_user_resource_mgr.h"
-#include "sql/monitor/full_link_trace/ob_flt_control_info_mgr.h"
+#include "sql/monitor/flt/ob_flt_control_info_mgr.h"
+#include "storage/concurrency_control/ob_multi_version_garbage_collector.h"
 
 using namespace oceanbase::common;
 using namespace oceanbase::sql;
@@ -378,17 +379,7 @@ int ObSQLSessionMgr::create_session(const uint64_t tenant_id,
   int err = OB_SUCCESS;
   session_info = NULL;
   ObSQLSessionInfo *tmp_sess = NULL;
-  if (RL_IS_ENABLED) {
-    int64_t sess_count = 0;
-    if (OB_FAIL(get_session_count(sess_count))) {
-      LOG_WARN("fail to get session count", K(ret));
-    } else if (sess_count > RL_CONF.get_max_session_count()) {
-      ret = OB_RESOURCE_OUT;
-      LOG_WARN("too much sessions", K(ret), K(sess_count), K(RL_CONF.get_max_session_count()));
-    }
-  }
-  if (OB_FAIL(ret)) {
-  } else if (OB_FAIL(sessinfo_map_.create(tenant_id, Key(sessid, proxy_sessid), tmp_sess))) {
+  if (OB_FAIL(sessinfo_map_.create(tenant_id, Key(sessid, proxy_sessid), tmp_sess))) {
     LOG_WARN("fail to create session", K(ret), K(sessid));
     if (OB_ENTRY_EXIST == ret) {
       ret = OB_SESSION_ENTRY_EXIST;
@@ -468,6 +459,21 @@ void ObSQLSessionMgr::try_check_session()
       OZ (check_session_leak());
     }
   }
+}
+
+int ObSQLSessionMgr::get_min_active_snapshot_version(share::SCN &snapshot_version)
+{
+  int ret = OB_SUCCESS;
+
+  concurrency_control::GetMinActiveSnapshotVersionFunctor min_active_txn_version_getter;
+
+  if (OB_FAIL(for_each_session(min_active_txn_version_getter))) {
+    LOG_WARN("fail to get min active snapshot version", K(ret));
+  } else {
+    snapshot_version = min_active_txn_version_getter.get_min_active_snapshot_version();
+  }
+
+  return ret;
 }
 
 int ObSQLSessionMgr::check_session_leak()
@@ -685,6 +691,8 @@ bool ObSQLSessionMgr::CheckSessionFunctor::operator()(sql::ObSQLSessionMgr::Key 
         } else if (true == is_timeout) {
           LOG_INFO("session is timeout, kill this session", K(key.sessid_));
           ret = sess_mgr_->kill_session(*sess_info);
+        } else if (sess_info->is_txn_free_route_temp()) {
+          sess_info->check_txn_free_route_alive();
         } else {
           //借助于session遍历的功能，尝试revert session上缓存的schema guard，
           //避免长时间持有guard，导致schema mgr的槽位无法释放
@@ -801,7 +809,7 @@ ObSessionGetterGuard::ObSessionGetterGuard(ObSQLSessionMgr &sess_mgr, uint32_t s
 {
   ret_ = mgr_.get_session(sessid, session_);
   if (OB_SUCCESS != ret_) {
-    LOG_WARN("get session fail", K(ret_), K(sessid));
+    LOG_WARN_RET(ret_, "get session fail", K(ret_), K(sessid));
   } else {
     NG_TRACE_EXT(session, OB_ID(sid), session_->get_sessid(),
                  OB_ID(tenant_id), session_->get_priv_tenant_id());

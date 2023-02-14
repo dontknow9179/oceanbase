@@ -186,7 +186,6 @@ int ObAllVirtualTabletSSTableMacroInfo::get_macro_info(
   ObMacroBlockHandle macro_handle;
   ObMacroBlockReadInfo macro_read_info;
   macro_read_info.macro_block_id_ = macro_id;
-  macro_read_info.io_desc_.set_category(ObIOCategory::USER_IO);
   macro_read_info.io_desc_.set_wait_event(ObWaitEventIds::DB_FILE_DATA_READ);
   macro_read_info.offset_ = 0;
   macro_read_info.size_ = OB_SERVER_BLOCK_MGR.get_macro_block_size();
@@ -339,7 +338,7 @@ int ObAllVirtualTabletSSTableMacroInfo::gen_row(
         break;
       case END_LOG_SCN:
         //end_log_scn
-        cur_row_.cells_[i].set_uint64(table_key.get_end_log_ts() < 0 ? 0 : table_key.get_end_log_ts());
+        cur_row_.cells_[i].set_uint64(!table_key.get_end_scn().is_valid() ? 0 : table_key.get_end_scn().get_val_for_inner_table_field());
         break;
       case MACRO_LOGIC_VERSION:
         //macro_logic_version
@@ -668,7 +667,7 @@ bool ObAllVirtualTabletSSTableMacroInfo::check_sstable_need_ignore(const ObITabl
   objs_[index++].set_int(MTL_ID()); // tenant_id
   objs_[index++].set_int(ls_id_); // ls_id
   objs_[index++].set_int(table_key.tablet_id_.id()); // tablet_id
-  objs_[index++].set_uint64(table_key.get_end_log_ts() < 0 ? 0 : table_key.get_end_log_ts()); // end_log_scn
+  objs_[index++].set_uint64(!table_key.get_end_scn().is_valid() ? 0 : table_key.get_end_scn().get_val_for_inner_table_field());
 
   ObRowkey rowkey(objs_, index + 1);
   for (int64_t i = 0; i < key_ranges_.count() && need_ignore; ++i) {

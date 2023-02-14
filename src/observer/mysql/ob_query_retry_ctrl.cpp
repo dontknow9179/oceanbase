@@ -111,7 +111,7 @@ public:
   {
     int refresh_err = v.result_.refresh_location_cache(is_async);
     if (OB_SUCCESS != refresh_err) {
-      LOG_WARN("fail to refresh location cache", K(is_async), K(refresh_err), K(v));
+      LOG_WARN_RET(OB_ERR_UNEXPECTED, "fail to refresh location cache", K(is_async), K(refresh_err), K(v));
     }
   }
 };
@@ -157,7 +157,7 @@ public:
       v.client_ret_ = v.err_;
       v.retry_type_ = RETRY_TYPE_NONE;
       v.no_more_test_ = true;
-      LOG_WARN("server down error, fast fail", K(v));
+      LOG_WARN_RET(v.err_, "server down error, fast fail", K(v));
     }
   }
 };
@@ -170,6 +170,24 @@ public:
   virtual void test(ObRetryParam &v) const override
   {
     v.retry_type_ = RETRY_TYPE_LOCAL;
+  }
+};
+
+class ObSwitchConsumerGroupRetryPolicy : public ObRetryPolicy
+{
+public:
+  ObSwitchConsumerGroupRetryPolicy() = default;
+  ~ObSwitchConsumerGroupRetryPolicy() = default;
+  virtual void test(ObRetryParam &v) const override
+  {
+    try_packet_retry(v);
+    if (RETRY_TYPE_LOCAL == v.retry_type_) {
+      LOG_WARN_RET(v.err_, "set retry packet failed, retry at local",
+        K(v.ctx_.multi_stmt_item_.is_part_of_multi_stmt()),
+        K(v.ctx_.multi_stmt_item_.get_seq_num()));
+      v.session_.set_group_id_not_expected(true);
+      v.result_.get_exec_context().set_need_disconnect(false);
+    }
   }
 };
 
@@ -224,7 +242,7 @@ public:
   {
     int err = v.err_;
     if (v.result_.is_pl_stmt(v.result_.get_stmt_type()) && !v.session_.get_pl_can_retry()) {
-      LOG_WARN("current pl can not retry, commit may have occurred",
+      LOG_WARN_RET(err, "current pl can not retry, commit may have occurred",
                K(v), K(v.result_.get_stmt_type()));
       v.client_ret_ = err;
       v.retry_type_ = RETRY_TYPE_NONE;
@@ -379,27 +397,23 @@ public:
   ~ObDMLPeerServerStateUncertainPolicy() = default;
   virtual void test(ObRetryParam &v) const override
   {
-    if (ObStmt::is_dml_write_stmt(v.result_.get_stmt_type())) {
-      if (OB_ISNULL(v.result_.get_physical_plan())) {
-        // issue#43741246
+    if (OB_ISNULL(v.result_.get_physical_plan())) {
+      // issue#43741246, plan not generated, won't be a remote trans
+      // safe to continue with other retry test
+    } else if (ObStmt::is_dml_write_stmt(v.result_.get_stmt_type())) {
+      // bugfix: https://aone.alibaba-inc.com/issue/16625449
+      // bugfix: https://work.aone.alibaba-inc.com/issue/22734058
+      bool autocommit = v.session_.get_local_autocommit();
+      ObPhyPlanType plan_type = v.result_.get_physical_plan()->get_plan_type();
+      bool in_transaction = v.session_.is_in_transaction();
+      if (ObSqlTransUtil::is_remote_trans(autocommit, in_transaction, plan_type)) {
+        // 当前observer内部无法进行重试
+        // err是OB_RPC_CONNECT_ERROR
         v.client_ret_ = v.err_;
         v.retry_type_ = RETRY_TYPE_NONE;
         v.no_more_test_ = true;
-      } else {
-        // bugfix: https://aone.alibaba-inc.com/issue/16625449
-        // bugfix: https://work.aone.alibaba-inc.com/issue/22734058
-        bool autocommit = v.session_.get_local_autocommit();
-        ObPhyPlanType plan_type = v.result_.get_physical_plan()->get_plan_type();
-        bool in_transaction = v.session_.is_in_transaction();
-        if (ObSqlTransUtil::is_remote_trans(autocommit, in_transaction, plan_type)) {
-          // 当前observer内部无法进行重试
-          // err是OB_RPC_CONNECT_ERROR
-          v.client_ret_ = v.err_;
-          v.retry_type_ = RETRY_TYPE_NONE;
-          v.no_more_test_ = true;
-          LOG_WARN("server down error, the write dml is remote, don't retry",
-                   K(autocommit), K(plan_type), K(in_transaction), K(v));
-        }
+        LOG_WARN_RET(v.err_, "server down error, the write dml is remote, don't retry",
+                 K(autocommit), K(plan_type), K(in_transaction), K(v));
       }
     }
   }
@@ -424,7 +438,7 @@ public:
         v.client_ret_ = OB_ERR_EXCLUSIVE_LOCK_CONFLICT;
         v.retry_type_ = RETRY_TYPE_NONE;
         v.no_more_test_ = true;
-        LOG_WARN("can not retry local", K(v));
+        LOG_WARN_RET(v.client_ret_, "can not retry local", K(v));
       }
     }
   }
@@ -442,7 +456,7 @@ public:
       v.client_ret_ = OB_TRANS_CANNOT_SERIALIZE;
       v.retry_type_ = RETRY_TYPE_NONE;
       v.no_more_test_ = true;
-      LOG_WARN("transaction cannot serialize", K(v));
+      LOG_WARN_RET(v.client_ret_, "transaction cannot serialize", K(v));
     }
   }
 };
@@ -457,7 +471,7 @@ public:
     v.client_ret_ = OB_TRANS_CANNOT_SERIALIZE;
     v.retry_type_ = RETRY_TYPE_NONE;
     v.no_more_test_ = true;
-    LOG_WARN("transaction cannot serialize", K(v));
+    LOG_WARN_RET(v.client_ret_, "transaction cannot serialize", K(v));
   }
 };
 
@@ -476,7 +490,7 @@ public:
         v.client_ret_ = v.err_;
         v.retry_type_ = RETRY_TYPE_NONE;
         v.no_more_test_ = true;
-        LOG_WARN("can not retry local. need to terminate to prevent thread resouce deadlock", K(v));
+        LOG_WARN_RET(v.client_ret_, "can not retry local. need to terminate to prevent thread resouce deadlock", K(v));
       }
     }
   }
@@ -645,6 +659,15 @@ void ObQueryRetryCtrl::location_error_proc(ObRetryParam &v)
   }
 }
 
+void ObQueryRetryCtrl::nonblock_location_error_proc(ObRetryParam &v)
+{
+  ObRetryObject retry_obj(v);
+  ObFastFailRetryPolicy fast_fail;
+  ObCommonRetryIndexLongWaitPolicy retry_long_wait;
+  ObRefreshLocationCacheNonblockPolicy nonblock_refresh;
+  retry_obj.test(fast_fail).test(retry_long_wait).test(nonblock_refresh);
+}
+
 void ObQueryRetryCtrl::location_error_nothing_readable_proc(ObRetryParam &v)
 {
   // 强一致性读的情况，主不可读了，有可能是invalid servers将主过滤掉了。
@@ -678,7 +701,7 @@ void ObQueryRetryCtrl::snapshot_discard_proc(ObRetryParam &v)
     // see: https://aone.alibaba-inc.com/req/21981135
     v.client_ret_ = v.err_;
     v.retry_type_ = RETRY_TYPE_NONE;
-    LOG_WARN("snapshot discarded in serializable isolation should not retry", K(v));
+    LOG_WARN_RET(v.client_ret_, "snapshot discarded in serializable isolation should not retry", K(v));
   } else {
     // 读到落后太多的备机或者正在回放日志的副本了
     // 副本不可读类型的错误最多在本线程重试1次。
@@ -714,6 +737,12 @@ void ObQueryRetryCtrl::force_local_retry_proc(ObRetryParam &v)
   retry_obj.test(force_local_retry);
 }
 
+void ObQueryRetryCtrl::switch_consumer_group_retry_proc(ObRetryParam &v)
+{
+  ObRetryObject retry_obj(v);
+  ObSwitchConsumerGroupRetryPolicy switch_group_retry;
+  retry_obj.test(switch_group_retry);
+}
 
 /////// For inner SQL only ///////////////
 void ObQueryRetryCtrl::inner_try_lock_row_conflict_proc(ObRetryParam &v)
@@ -831,17 +860,17 @@ void ObQueryRetryCtrl::after_func(ObRetryParam &v)
 {
   if (OB_TRY_LOCK_ROW_CONFLICT != v.client_ret_ && OB_ERR_PROXY_REROUTE != v.client_ret_) {
     //锁冲突就不要打印了，避免日志刷屏
-    LOG_WARN("[RETRY] check if need retry", K(v), "need_retry", RETRY_TYPE_NONE != v.retry_type_);
+    LOG_WARN_RET(v.client_ret_, "[RETRY] check if need retry", K(v), "need_retry", RETRY_TYPE_NONE != v.retry_type_);
   }
   if (RETRY_TYPE_NONE != v.retry_type_) {
     v.session_.get_retry_info_for_update().set_last_query_retry_err(v.err_);
     v.session_.get_retry_info_for_update().inc_retry_cnt();
     if (OB_UNLIKELY(v.err_ != v.client_ret_)) {
-      LOG_ERROR("when need retry, v.client_ret_ must be equal to err", K(v));
+      LOG_ERROR_RET(OB_ERR_UNEXPECTED, "when need retry, v.client_ret_ must be equal to err", K(v));
     }
   }
   if (OB_UNLIKELY(OB_SUCCESS == v.client_ret_)) {
-    LOG_ERROR("no matter need retry or not, v.client_ret_ should not be OB_SUCCESS", K(v));
+    LOG_ERROR_RET(OB_ERR_UNEXPECTED, "no matter need retry or not, v.client_ret_ should not be OB_SUCCESS", K(v));
   }
 }
 
@@ -927,10 +956,11 @@ int ObQueryRetryCtrl::init()
   ERR_RETRY_FUNC("NETWORK",  OB_RPC_POST_ERROR,                  peer_server_status_uncertain_proc, inner_peer_server_status_uncertain_proc);
 
   /* storage */
-  ERR_RETRY_FUNC("STORAGE",  OB_SNAPSHOT_DISCARDED,              snapshot_discard_proc,      short_wait_retry_proc);
-  ERR_RETRY_FUNC("STORAGE",  OB_DATA_NOT_UPTODATE,               long_wait_retry_proc,       short_wait_retry_proc);
-  ERR_RETRY_FUNC("STORAGE",  OB_REPLICA_NOT_READABLE,            long_wait_retry_proc,       short_wait_retry_proc);
-  ERR_RETRY_FUNC("STORAGE",  OB_PARTITION_IS_SPLITTING,          short_wait_retry_proc,      short_wait_retry_proc);
+  ERR_RETRY_FUNC("STORAGE",  OB_SNAPSHOT_DISCARDED,              snapshot_discard_proc,         short_wait_retry_proc);
+  ERR_RETRY_FUNC("STORAGE",  OB_DATA_NOT_UPTODATE,               long_wait_retry_proc,          short_wait_retry_proc);
+  ERR_RETRY_FUNC("STORAGE",  OB_REPLICA_NOT_READABLE,            long_wait_retry_proc,          short_wait_retry_proc);
+  ERR_RETRY_FUNC("STORAGE",  OB_PARTITION_IS_SPLITTING,          short_wait_retry_proc,         short_wait_retry_proc);
+  ERR_RETRY_FUNC("STORAGE",  OB_DISK_CORRUPTED,                  nonblock_location_error_proc,  empty_proc);
 
   /* trx */
   ERR_RETRY_FUNC("TRX",      OB_TRY_LOCK_ROW_CONFLICT,           try_lock_row_conflict_proc, inner_try_lock_row_conflict_proc);
@@ -944,8 +974,9 @@ int ObQueryRetryCtrl::init()
   ERR_RETRY_FUNC("SQL",      OB_ERR_INSUFFICIENT_PX_WORKER,      px_thread_not_enough_proc,  short_wait_retry_proc);
   // create a new interval part when inserting a row which has no matched part,
   // wait and retry, will see new part
-  ERR_RETRY_FUNC("SQL",      OB_NO_PARTITION_FOR_INTERVAL_PART,  short_wait_retry_proc,      short_wait_retry_proc);
-  ERR_RETRY_FUNC("SQL",      OB_SQL_RETRY_SPM,                   force_local_retry_proc,     force_local_retry_proc);
+  ERR_RETRY_FUNC("SQL",      OB_NO_PARTITION_FOR_INTERVAL_PART,  short_wait_retry_proc,             short_wait_retry_proc);
+  ERR_RETRY_FUNC("SQL",      OB_SQL_RETRY_SPM,                   force_local_retry_proc,            force_local_retry_proc);
+  ERR_RETRY_FUNC("SQL",      OB_NEED_SWITCH_CONSUMER_GROUP,      switch_consumer_group_retry_proc,  empty_proc);
 
   /* ddl */
 

@@ -92,7 +92,7 @@ class ObInsertValueGenerator
 {
 public:
   ObInsertValueGenerator() : cs_type_(common::CS_TYPE_INVALID), data_buffer_(NULL) {}
-  int init(ObSQLSessionInfo &session, ObLoadFileBuffer* data_buffer);
+  int init(ObSQLSessionInfo &session, ObLoadFileBuffer* data_buffer, ObSchemaGetterGuard *schema_guard);
   int set_params(common::ObString &insert_header, common::ObCollationType cs_type);
   int fill_field_expr(common::ObIArray<ObCSVGeneralParser::FieldValue> &field_values,
                       const common::ObBitSet<> &string_values);
@@ -351,6 +351,7 @@ public:
   int64_t get_buffer_size() { return buffer_size_; }
   int64_t *get_pos() { return &pos_; }
   void reset() { pos_ = 0; }
+  TO_STRING_KV(K_(pos), K_(buffer_size));
 private:
   int64_t pos_;
   int64_t buffer_size_;
@@ -392,8 +393,8 @@ public:
 
   int backup_incomplate_data(ObLoadFileBuffer &buffer, int64_t valid_data_len);
   int recover_incomplate_data(ObLoadFileBuffer &buffer);
-  bool has_incomplate_data() { return incomplate_data_len_ > 0; }
-  int64_t get_lines_count() { return lines_cnt_; }
+  bool has_incomplate_data() const { return incomplate_data_len_ > 0; }
+  int64_t get_lines_count() const { return lines_cnt_; }
   void commit_line_cnt(int64_t line_cnt) { lines_cnt_ += line_cnt; }
 private:
   ObCSVFormats formats_;//TODO [load data] change to ObInverseParser(formats)
@@ -632,7 +633,7 @@ struct ObFileReadCursor {
     read_size_ = 0;
     is_end_file_ = false;
   }
-  bool inline is_end_file() { return is_end_file_; }
+  bool inline is_end_file() const { return is_end_file_; }
   int64_t inline get_total_read_MBs() { return file_offset_ >> 20; }
   int64_t inline get_total_read_GBs() { return file_offset_ >> 30; }
   void commit_read() {

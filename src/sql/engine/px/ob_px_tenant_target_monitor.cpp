@@ -315,26 +315,33 @@ int ObPxTenantTargetMonitor::update_peer_target_used(const ObAddr &server, int64
 {
   int ret = OB_SUCCESS;
   ServerTargetUsage target_usage;
+  auto update_peer_used = [=](hash::HashMapPair<ObAddr, ServerTargetUsage> &entry) -> void {
+    if (is_leader()) {
+      entry.second.update_peer_used(peer_used);
+    } else {
+      entry.second.set_peer_used(peer_used);
+    }
+  };
   if (OB_FAIL(global_target_usage_.get_refactored(server, target_usage))) {
     if (ret != OB_HASH_NOT_EXIST) {
       LOG_WARN("get refactored failed", K(ret));
     } else {
-      target_usage.set_peer_used(peer_used);
-      if (OB_FAIL(global_target_usage_.set_refactored(server, target_usage))) {
-        LOG_WARN("set refactored failed", K(ret));
+      ObLockGuard<ObSpinLock> lock_guard(spin_lock_);
+      if (OB_FAIL(global_target_usage_.get_refactored(server, target_usage))) {
+        if (ret != OB_HASH_NOT_EXIST) {
+          LOG_WARN("get refactored failed", K(ret));
+        } else {
+          target_usage.set_peer_used(peer_used);
+          if (OB_FAIL(global_target_usage_.set_refactored(server, target_usage))) {
+            LOG_WARN("set refactored failed", K(ret));
+          }
+        }
+      } else if (OB_FAIL(global_target_usage_.atomic_refactored(server, update_peer_used))) {
+        LOG_WARN("atomic refactored, update_peer_used failed", K(ret));
       }
     }
-  } else {
-    auto update_peer_used = [=](hash::HashMapPair<ObAddr, ServerTargetUsage> &entry) -> void {
-      if (is_leader()) {
-        entry.second.update_peer_used(peer_used);
-      } else {
-        entry.second.set_peer_used(peer_used);
-      }
-    };
-    if (OB_FAIL(global_target_usage_.atomic_refactored(server, update_peer_used))) {
-      LOG_WARN("atomic refactored, update_peer_used failed", K(ret));
-    }
+  } else if (OB_FAIL(global_target_usage_.atomic_refactored(server, update_peer_used))) {
+    LOG_WARN("atomic refactored, update_peer_used failed", K(ret));
   }
   return ret;
 }
@@ -361,6 +368,7 @@ int ObPxTenantTargetMonitor::get_global_target_usage(const hash::ObHashMap<ObAdd
 int ObPxTenantTargetMonitor::reset_statistics(uint64_t version)
 {
   int ret = OB_SUCCESS;
+  ObLockGuard<ObSpinLock> lock_guard(spin_lock_);
   global_target_usage_.clear();
   if (OB_FAIL(global_target_usage_.set_refactored(server_, ServerTargetUsage()))) {
     LOG_WARN("set refactored failed", K(ret));

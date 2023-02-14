@@ -72,7 +72,10 @@ bool ObMultiSourceData::has_multi_source_data_unit(const MultiSourceDataUnitType
   return bret;
 }
 
-int ObMultiSourceData::get_multi_source_data_unit(ObIMultiSourceDataUnit *const dst, ObIAllocator *allocator)
+int ObMultiSourceData::get_multi_source_data_unit(
+    ObIMultiSourceDataUnit *const dst,
+    ObIAllocator *allocator,
+    bool get_lastest)
 {
   int ret = OB_SUCCESS;
   const int pos = static_cast<int>(dst->type());
@@ -88,10 +91,19 @@ int ObMultiSourceData::get_multi_source_data_unit(ObIMultiSourceDataUnit *const 
       ret = OB_INVALID_ARGUMENT;
       TRANS_LOG(WARN, "wrong unit type", K(ret), K(list_pos));
     }
-    DLIST_FOREACH_BACKWARD_X(item, unit_list_array_[list_pos], OB_SUCC(ret)) {
-      if (item->is_sync_finish()) {
-        src = item;
-        break;
+    if (get_lastest) {
+      DLIST_FOREACH_BACKWARD_X(item, unit_list_array_[list_pos], OB_SUCC(ret)) {
+        if (item->is_sync_finish()) {
+          src = item;
+          break;
+        }
+      }
+    } else {
+      DLIST_FOREACH_X(item, unit_list_array_[list_pos], OB_SUCC(ret)) {
+        if (item->is_sync_finish()) {
+          src = item;
+          break;
+        }
       }
     }
     if (nullptr == src) {
@@ -164,6 +176,7 @@ int ObMultiSourceData::inner_mark_unit_sync_finish(
           KPC(last_item));
     } else {
       last_item->set_sync_finish(true);
+
       if (save_last_flag) {
         (void)inner_release_rest_unit_data(list_pos, unit_version);
       }
@@ -223,5 +236,20 @@ int ObMultiSourceData::get_unsync_cnt_for_multi_data(const MultiSourceDataUnitTy
   return ret;
 }
 
+int64_t ObMultiSourceData::get_all_unsync_cnt_for_multi_data()
+{
+  int ret = OB_SUCCESS;
+  int64_t unsynced_cnt_for_multi_data = 0;
+
+  for (int i = 0; i < MAX_PTR_COUNT; ++i) {
+    ObIMultiSourceDataUnit *value = units_[i];
+    if (nullptr != value && value->is_valid()) {
+      int64_t cnt = value->get_unsync_cnt_for_multi_data();
+      unsynced_cnt_for_multi_data += cnt;
+    }
+  }
+
+  return unsynced_cnt_for_multi_data;
+}
 } // namespace memtable
 } // namespace oceanbase

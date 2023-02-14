@@ -21,12 +21,14 @@
 #include "share/ob_tablet_checksum_operator.h"
 #include "observer/ob_srv_network_frame.h"
 #include "share/rc/ob_tenant_base.h"
+#include "share/scn.h"
 
 namespace oceanbase
 {
 using namespace common;
 using namespace share;
 using namespace obrpc;
+using namespace share::schema;
 namespace rootserver
 {
 ObDailyMajorFreezeLauncher::ObDailyMajorFreezeLauncher()
@@ -205,18 +207,18 @@ int ObDailyMajorFreezeLauncher::try_gc_tablet_checksum()
     // nothing
   } else {
     ObMySQLTransaction trans;
-    SMART_VAR(ObArray<int64_t>, all_snapshot_version) {
+    SMART_VAR(ObArray<SCN>, all_compaction_scn) {
       if (OB_FAIL(trans.start(sql_proxy_, tenant_id_))) {
         LOG_WARN("fail to start transaction", KR(ret), K_(tenant_id));
-      } else if (OB_FAIL(ObTabletChecksumOperator::load_all_snapshot_versions(trans, 
-                tenant_id_, all_snapshot_version))) {
-        LOG_WARN("fail to load all snapshot version", KR(ret), K_(tenant_id));
-      } else if (all_snapshot_version.count() > MIN_RESERVED_COUNT) {
-        const int64_t snapshot_ver_cnt = all_snapshot_version.count();
-        const int64_t gc_snapshot_version = all_snapshot_version.at(snapshot_ver_cnt - MIN_RESERVED_COUNT - 1);
+      } else if (OB_FAIL(ObTabletChecksumOperator::load_all_compaction_scn(trans,
+                tenant_id_, all_compaction_scn))) {
+        LOG_WARN("fail to load all compaction scn", KR(ret), K_(tenant_id));
+      } else if (all_compaction_scn.count() > MIN_RESERVED_COUNT) {
+        const int64_t snapshot_ver_cnt = all_compaction_scn.count();
+        const SCN &gc_snapshot_scn = all_compaction_scn.at(snapshot_ver_cnt - MIN_RESERVED_COUNT - 1);
 
-        if (OB_FAIL(ObTabletChecksumOperator::delete_tablet_checksum_items(trans, tenant_id_, gc_snapshot_version))) {
-          LOG_WARN("fail to delete tablet checksum items", KR(ret), K_(tenant_id), K(gc_snapshot_version));
+        if (OB_FAIL(ObTabletChecksumOperator::delete_tablet_checksum_items(trans, tenant_id_, gc_snapshot_scn))) {
+          LOG_WARN("fail to delete tablet checksum items", KR(ret), K_(tenant_id), K(gc_snapshot_scn));
         }
       }
     }
@@ -225,7 +227,7 @@ int ObDailyMajorFreezeLauncher::try_gc_tablet_checksum()
       int tmp_ret = OB_SUCCESS;
       if (OB_SUCCESS != (tmp_ret = trans.end(OB_SUCC(ret)))) {
         ret = ((OB_SUCC(ret)) ? tmp_ret : ret);
-        LOG_WARN("fail to end trans", "is_commit", OB_SUCC(ret), KR(tmp_ret));
+        LOG_WARN("fail to end trans", "is_commit", OB_SUCCESS == ret, KR(tmp_ret));
       }
     }
 

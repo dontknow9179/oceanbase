@@ -102,10 +102,10 @@ using namespace oceanbase::obmysql;
 
 void ObSrvRpcXlator::register_rpc_process_function(int pcode, RPCProcessFunc func) {
   if(pcode >= MAX_PCODE || pcode < 0) {
-    SERVER_LOG(ERROR, "(SHOULD NEVER HAPPEN) input pcode is out of range in server rpc xlator", K(pcode));
+    SERVER_LOG_RET(ERROR, OB_ERROR, "(SHOULD NEVER HAPPEN) input pcode is out of range in server rpc xlator", K(pcode));
     ob_abort();
   } else if (funcs_[pcode] != nullptr) {
-    SERVER_LOG(ERROR, "(SHOULD NEVER HAPPEN) duplicate pcode in server rpc xlator", K(pcode));
+    SERVER_LOG_RET(ERROR, OB_ERROR, "(SHOULD NEVER HAPPEN) duplicate pcode in server rpc xlator", K(pcode));
     ob_abort();
   } else {
     funcs_[pcode] = func;
@@ -207,7 +207,7 @@ int ObSrvMySQLXlator::translate(rpc::ObRequest &req, ObReqProcessor *&processor)
         MYSQL_PROCESSOR(ObMPStmtPrexecute, gctx_);
         MYSQL_PROCESSOR(ObMPStmtSendPieceData, gctx_);
         MYSQL_PROCESSOR(ObMPStmtGetPieceData, gctx_);
-        //MYSQL_PROCESSOR(ObMPStmtSendLongData, gctx_);
+        MYSQL_PROCESSOR(ObMPStmtSendLongData, gctx_);
         MYSQL_PROCESSOR(ObMPResetConnection, gctx_);
         // ps stmt close request may not response packet.
         // Howerver, in get processor phase, it may report 
@@ -251,14 +251,6 @@ int ObSrvMySQLXlator::translate(rpc::ObRequest &req, ObReqProcessor *&processor)
             }
           } else {
             NEW_MYSQL_PROCESSOR(ObMPQuery, gctx_);
-          }
-          break;
-        }
-        case obmysql::COM_STMT_SEND_LONG_DATA: {
-          if (GCONF._enable_new_sql_nio) {
-            NEW_MYSQL_PROCESSOR(ObMPStmtSendLongData, gctx_);
-          } else {
-            NEW_MYSQL_PROCESSOR(ObMPDefault, gctx_);
           }
           break;
         }

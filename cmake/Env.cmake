@@ -23,6 +23,7 @@ ob_define(OB_CMAKE_RULES_CHECK ON)
 ob_define(OB_STATIC_LINK_LGPL_DEPS ON)
 ob_define(HOTFUNC_PATH "${CMAKE_SOURCE_DIR}/hotfuncs.txt")
 ob_define(OB_BUILD_CCLS OFF)
+ob_define(ENABLE_EXE_PIE OFF)
 
 # 'ENABLE_PERF_MODE' use for offline system insight performance test
 # PERF_MODE macro controls many special code path in system
@@ -47,10 +48,23 @@ if(ENABLE_AUTO_FDO)
   set(AUTO_FDO_OPT "-fprofile-sample-use=${CMAKE_SOURCE_DIR}/observer.prof")
 endif()
 
+ob_define(THIN_LTO_OPT "")
+ob_define(THIN_LTO_CONCURRENCY_LINK "")
+
+if(ENABLE_THIN_LTO)
+  set(THIN_LTO_OPT "-flto=thin")
+  set(THIN_LTO_CONCURRENCY_LINK "-Wl,--thinlto-jobs=16")
+endif()
+
 
 # should not use initial-exec for tls-model if building OBCDC.
 if(NOT OB_BUILD_CDC)
   add_definitions(-DENABLE_INITIAL_EXEC_TLS_MODEL)
+endif()
+
+ob_define(OB_EXE_LINKER_OPT "")
+if (ENABLE_EXE_PIE)
+  set(OB_EXE_LINKER_OPT "-pie")
 endif()
 
 if (OB_USE_CLANG)
@@ -76,11 +90,11 @@ if (OB_USE_CLANG)
     set(REORDER_LINK_OPT "-Wl,--no-rosegment,--build-id=sha1,--no-warn-symbol-ordering,--symbol-ordering-file,${HOTFUNC_PATH}")
     set(OB_LD_BIN "${DEVTOOLS_DIR}/bin/ld.lld")
   endif()
-  set(CMAKE_CXX_FLAGS "--gcc-toolchain=${GCC9} ${DEBUG_PREFIX} ${AUTO_FDO_OPT} -fcolor-diagnostics ${REORDER_COMP_OPT} -fmax-type-align=8 ${CMAKE_ASAN_FLAG} ${CMAKE_COVERAGE_FLAG} -std=gnu++11")
-  set(CMAKE_C_FLAGS "--gcc-toolchain=${GCC9} ${DEBUG_PREFIX} ${AUTO_FDO_OPT} -fcolor-diagnostics ${REORDER_COMP_OPT} -fmax-type-align=8 ${CMAKE_ASAN_FLAG} ${CMAKE_COVERAGE_FLAG}")
-  set(CMAKE_CXX_LINK_FLAGS "${LD_OPT} --gcc-toolchain=${GCC9} ${DEBUG_PREFIX} ${AUTO_FDO_OPT}")
-  set(CMAKE_SHARED_LINKER_FLAGS "${LD_OPT} -Wl,-z,noexecstack ${REORDER_LINK_OPT}")
-  set(CMAKE_EXE_LINKER_FLAGS "${LD_OPT} -Wl,-z,noexecstack ${REORDER_LINK_OPT}")
+  set(CMAKE_CXX_FLAGS "--gcc-toolchain=${GCC9} ${DEBUG_PREFIX} ${AUTO_FDO_OPT} ${THIN_LTO_OPT} -fcolor-diagnostics ${REORDER_COMP_OPT} -fmax-type-align=8 ${CMAKE_ASAN_FLAG} ${CMAKE_COVERAGE_FLAG} -std=gnu++11")
+  set(CMAKE_C_FLAGS "--gcc-toolchain=${GCC9} ${DEBUG_PREFIX} ${AUTO_FDO_OPT} ${THIN_LTO_OPT} -fcolor-diagnostics ${REORDER_COMP_OPT} -fmax-type-align=8 ${CMAKE_ASAN_FLAG} ${CMAKE_COVERAGE_FLAG}")
+  set(CMAKE_CXX_LINK_FLAGS "${LD_OPT} ${THIN_LTO_CONCURRENCY_LINK} --gcc-toolchain=${GCC9} ${DEBUG_PREFIX} ${AUTO_FDO_OPT}")
+  set(CMAKE_SHARED_LINKER_FLAGS "${LD_OPT} -Wl,-z,noexecstack ${THIN_LTO_CONCURRENCY_LINK} ${REORDER_LINK_OPT}")
+  set(CMAKE_EXE_LINKER_FLAGS "${LD_OPT} -Wl,-z,noexecstack ${THIN_LTO_CONCURRENCY_LINK} ${REORDER_LINK_OPT} ${OB_EXE_LINKER_OPT}")
 else() # not clang, use gcc
   message("gcc9 not support currently, please set OB_USE_CLANG ON and we will finish it as soon as possible")
 endif()

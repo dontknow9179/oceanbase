@@ -54,18 +54,18 @@ set(CPACK_RPM_SPEC_MORE_DEFINE
 install(PROGRAMS
   tools/import_time_zone_info.py
   ${CMAKE_BINARY_DIR}/src/observer/observer
-  $<$<STREQUAL:${ARCHITECTURE},"x86_64">:tools/mysql_tzinfo_to_sql>
   DESTINATION bin
   COMPONENT server)
 
 install(FILES
   src/sql/fill_help_tables-ob.sql
   tools/timezone_V1.log
+  tools/default_srs_data_mysql.sql
   tools/upgrade/upgrade_pre.py
   tools/upgrade/upgrade_post.py
-  tools/upgrade/upgrade_post_checker.py
   tools/upgrade/upgrade_checker.py
-  tools/upgrade/upgrade_cluster_health_checker.py
+  tools/upgrade/upgrade_health_checker.py
+  tools/upgrade/oceanbase_upgrade_dep.yml
   DESTINATION etc
   COMPONENT server)
 
@@ -224,7 +224,6 @@ install(FILES
   deps/oblib/src/lib/lock/ob_spin_rwlock.h
   deps/oblib/src/lib/lock/ob_thread_cond.h
   deps/oblib/src/lib/lock/ob_rwlock.h
-  deps/oblib/src/lib/lock/threadmutex.h
   deps/oblib/src/lib/metrics/ob_counter.h
   deps/oblib/src/lib/net/ob_addr.h
   deps/oblib/src/lib/net/ob_net_util.h
@@ -243,7 +242,6 @@ install(FILES
   deps/oblib/src/lib/queue/ob_fixed_queue.h
   deps/oblib/src/lib/queue/ob_link.h
   deps/oblib/src/lib/random/ob_random.h
-  deps/oblib/src/lib/regex/ob_regex.h
   deps/oblib/src/lib/resource/achunk_mgr.h
   deps/oblib/src/lib/resource/ob_cache_washer.h
   deps/oblib/src/lib/resource/ob_resource_mgr.h

@@ -17,6 +17,7 @@
 #include "share/config/ob_system_config.h"
 #include "share/config/ob_common_config.h"
 #include "share/config/ob_config_helper.h"
+#include "lib/lock/ob_drw_lock.h"
 
 namespace oceanbase {
 
@@ -32,6 +33,8 @@ class ObTenantConfigMgr;
 
 class ObTenantConfig : public ObCommonConfig
 {
+public:
+  static const int64_t INITIAL_TENANT_CONF_VERSION = 1;
 public:
   class TenantConfigUpdateTask : public common::ObTimerTask
   {
@@ -60,7 +63,7 @@ public:
     volatile int64_t running_task_count_;
   };
   friend class TenantConfigUpdateTask;
-
+  static const int64_t LOCK_TIMEOUT = 1 * 1000 * 1000;
 public:
   ObTenantConfig();
   ObTenantConfig(uint64_t tenant_id);
@@ -79,6 +82,7 @@ public:
   int try_rdlock();
   int try_wrlock();
   int unlock();
+  int wrunlock();
 
   int read_config();
   uint64_t get_tenant_id() const { return tenant_id_; }
@@ -87,9 +91,9 @@ public:
   int got_version(int64_t version, const bool remove_repeat);
   int update_local(int64_t expected_version, common::ObMySQLProxy::MySQLResult &result,
                    bool save2file = true);
-  int add_extra_config(char *config_str,
-                   int64_t version = 0 ,
-                   bool check_name = false);
+  int add_extra_config(const char *config_str,
+                       int64_t version = 0 ,
+                       bool check_name = false);
 
   OB_UNIS_VERSION(1);
 private:
@@ -100,7 +104,7 @@ private:
   common::ObSystemConfig system_config_;
   ObTenantConfigMgr *config_mgr_;
   // protect this object from being deleted in OTC_MGR.del_tenant_config
-  common::ObLatch lock_;
+  mutable common::DRWLock lock_;
   bool is_deleting_;
 
 public:

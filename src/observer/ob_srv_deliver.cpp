@@ -27,6 +27,7 @@
 #include "rpc/obmysql/obsm_struct.h"
 #include "observer/omt/ob_tenant.h"
 #include "observer/omt/ob_multi_tenant.h"
+#include "rpc/obmysql/ob_mysql_packet.h"
 
 using namespace oceanbase::common;
 
@@ -80,7 +81,7 @@ int check_easy_memory_limit(ObRequest &req)
   return ret;
 }
 
-int ObSrvDeliver::get_mysql_login_thread_count_to_set(int cfg_cnt) 
+int ObSrvDeliver::get_mysql_login_thread_count_to_set(int cfg_cnt)
 {
   int set_cnt = 0;
   if (0 < cfg_cnt) {
@@ -133,6 +134,7 @@ ObSrvDeliver::ObSrvDeliver(ObiReqQHandler &qhandler,
       host_(),
       lease_queue_(NULL),
       ddl_queue_(NULL),
+      ddl_parallel_queue_(NULL),
       mysql_queue_(NULL),
       diagnose_queue_(NULL),
       session_handler_(session_handler),
@@ -173,6 +175,10 @@ void ObSrvDeliver::stop()
     TG_STOP(lib::TGDefIDs::DDLQueueTh);
     TG_WAIT(lib::TGDefIDs::DDLQueueTh);
   }
+  if (NULL != ddl_parallel_queue_) {
+    TG_STOP(lib::TGDefIDs::DDLPQueueTh);
+    TG_WAIT(lib::TGDefIDs::DDLPQueueTh);
+  }
 }
 
 int ObSrvDeliver::create_queue_thread(int tg_id, const char *thread_name, QueueThread *&qthread)
@@ -197,6 +203,7 @@ int ObSrvDeliver::init_queue_threads()
   // TODO: fufeng, make it configurable
   if (OB_FAIL(create_queue_thread(lib::TGDefIDs::LeaseQueueTh, "LeaseQueueTh", lease_queue_))) {
   } else if (OB_FAIL(create_queue_thread(lib::TGDefIDs::DDLQueueTh, "DDLQueueTh", ddl_queue_))) {
+  } else if (OB_FAIL(create_queue_thread(lib::TGDefIDs::DDLPQueueTh, "DDLPQueueTh", ddl_parallel_queue_))) {
   } else if (OB_FAIL(create_queue_thread(lib::TGDefIDs::MysqlQueueTh,
                                          "MysqlQueueTh", mysql_queue_))) {
   } else if (OB_FAIL(create_queue_thread(lib::TGDefIDs::DiagnoseQueueTh,
@@ -253,8 +260,12 @@ int ObSrvDeliver::deliver_rpc_request(ObRequest &req)
   } else if (OB_RENEW_LEASE == pkt.get_pcode()) {
     queue = &lease_queue_->queue_;
   } else if (10 == pkt.get_priority()) {
-    // DDL rpc
-    queue = &ddl_queue_->queue_;
+    // for new parallel truncate table rpc
+    if (OB_TRUNCATE_TABLE_V2 == pkt.get_pcode()) {
+      queue = &ddl_parallel_queue_->queue_;
+    } else {
+      queue = &ddl_queue_->queue_;
+    }
   } else {
     const uint64_t tenant_id = pkt.get_tenant_id();
     const uint64_t priv_tenant_id = pkt.get_priv_tenant_id();
@@ -321,7 +332,26 @@ int ObSrvDeliver::deliver_mysql_request(ObRequest &req)
   if (NULL != sess) {
     conn = static_cast<ObSMConnection *>(sess);
     tenant = conn->tenant_;
-    req.set_group_id(conn->group_id_);
+    if (static_cast<int64_t>(share::OBCG_DEFAULT) == req.get_group_id()) {
+      int64_t valid_sql_req_level = req.get_sql_request_level() ? req.get_sql_request_level() : conn->sql_req_level_;
+      switch (valid_sql_req_level)
+      {
+      case 1:
+        req.set_group_id(share::OBCG_ID_SQL_REQ_LEVEL1);
+        break;
+      case 2:
+        req.set_group_id(share::OBCG_ID_SQL_REQ_LEVEL2);
+        break;
+      case 3:
+        req.set_group_id(share::OBCG_ID_SQL_REQ_LEVEL3);
+        break;
+      default:
+        req.set_group_id(conn->group_id_);
+        break;
+      }
+    } else {
+      req.set_group_id(conn->group_id_);
+    }
   } else {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("session from request is NULL", K(req), K(ret));

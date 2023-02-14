@@ -27,7 +27,7 @@ class ObILogAllocator;
 }
 namespace palf
 {
-class PalfEnvImpl;
+class IPalfEnvImpl;
 class FetchLogTask
 {
 public:
@@ -45,7 +45,7 @@ public:
           const int64_t log_size,
           const int64_t log_count,
           const int64_t accepted_mode_pid);
-  int64_t get_timestamp_ns() const { return timestamp_ns_; }
+  int64_t get_timestamp_us() const { return timestamp_us_; }
   int64_t get_id() const { return id_; }
   const common::ObAddr &get_server() const { return server_; }
   FetchLogType get_fetch_type() const { return fetch_type_; }
@@ -56,12 +56,12 @@ public:
   int64_t get_log_count() const { return log_count_; }
   int64_t get_accepted_mode_meta() const { return accepted_mode_pid_; }
 
-  TO_STRING_KV(K_(timestamp_ns), K_(id), K_(server), K_(fetch_type), K_(proposal_id),
+  TO_STRING_KV(K_(timestamp_us), K_(id), K_(server), K_(fetch_type), K_(proposal_id),
                K_(prev_lsn), K_(start_lsn), K_(log_size), K_(log_count), K_(accepted_mode_pid));
 private:
   DISALLOW_COPY_AND_ASSIGN(FetchLogTask);
 private:
-  int64_t timestamp_ns_;
+  int64_t timestamp_us_;
   int64_t id_;
   common::ObAddr server_;
   FetchLogType fetch_type_;
@@ -84,7 +84,7 @@ public:
   FetchLogEngine();
   ~FetchLogEngine() { destroy(); }
 public:
-  int init(PalfEnvImpl *palf_env_impl, ObILogAllocator *alloc_mgr);
+  int init(IPalfEnvImpl *palf_env_impl, ObILogAllocator *alloc_mgr);
   void destroy();
   int submit_fetch_log_task(FetchLogTask *fetch_log_task);
 public:
@@ -95,13 +95,15 @@ public:
   void handle_drop(void *task);
   FetchLogTask *alloc_fetch_log_task();
   void free_fetch_log_task(FetchLogTask *task);
+  int update_replayable_point(const share::SCN &replayable_scn);
 private:
   bool is_task_queue_timeout_(FetchLogTask *fetch_log_task) const;
 private:
   int tg_id_;
   bool is_inited_;
-  PalfEnvImpl *palf_env_impl_;
+  IPalfEnvImpl *palf_env_impl_;
   common::ObILogAllocator *allocator_;
+  share::SCN replayable_point_;
   DISALLOW_COPY_AND_ASSIGN(FetchLogEngine);
 };
 } // namespace logservice

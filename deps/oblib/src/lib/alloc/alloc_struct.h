@@ -104,7 +104,7 @@ struct ObLabel
   }
   // for format print
   operator const char*() const;
-  bool is_valid() const { return nullptr != str_; }
+  bool is_valid() const { return nullptr != str_ && '\0' != str_[0]; }
   int64_t to_string(char *buf, const int64_t buf_len) const;
   const char *str_;
 };
@@ -417,6 +417,7 @@ char *AChunk::blk_data(const ABlock *block) const
 ABlock::ABlock() :
     MAGIC_CODE_(ABLOCK_MAGIC_CODE),
     alloc_bytes_(0),
+    ablock_size_(0),
     obj_set_(NULL), mem_context_(0),
     prev_(this), next_(this)
 {}

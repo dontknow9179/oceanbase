@@ -63,6 +63,7 @@ int ObDropIndexTask::init(
     parent_task_id_ = parent_task_id;
     task_version_ = OB_DROP_INDEX_TASK_VERSION;
     is_inited_ = true;
+    ddl_tracing_.open();
   }
   return ret;
 }
@@ -96,6 +97,8 @@ int ObDropIndexTask::init(
     if (OB_FAIL(ret)) {
     } else {
       is_inited_ = true;
+      // set up span during recover task
+    ddl_tracing_.open_for_recovery();
     }
   }
   return ret;
@@ -133,9 +136,12 @@ int ObDropIndexTask::update_index_status(const ObIndexStatus new_status)
     arg.status_ = new_status;
     arg.exec_tenant_id_ = tenant_id_;
     arg.in_offline_ddl_white_list_ = index_schema->get_table_state_flag() != TABLE_STATE_NORMAL;
-
+    int64_t ddl_rpc_timeout = 0;
+    int64_t table_id = index_schema->get_table_id();
     DEBUG_SYNC(BEFORE_UPDATE_GLOBAL_INDEX_STATUS);
-    if (OB_FAIL(root_service_->get_common_rpc_proxy().to(GCTX.self_addr()).update_index_status(arg))) {
+    if (OB_FAIL(ObDDLUtil::get_ddl_rpc_timeout(tenant_id_, table_id, ddl_rpc_timeout))) {
+      LOG_WARN("get ddl rpc timeout fail", K(ret));
+    } else if (OB_FAIL(root_service_->get_common_rpc_proxy().to(GCTX.self_addr()).timeout(ddl_rpc_timeout).update_index_status(arg))) {
       LOG_WARN("update index status failed", K(ret), K(arg));
     } else {
       LOG_INFO("notify index status changed finish", K(new_status), K(target_object_id_));
@@ -150,22 +156,20 @@ int ObDropIndexTask::prepare(const ObDDLTaskStatus new_status)
   if (OB_UNLIKELY(!is_inited_)) {
     ret = OB_NOT_INIT;
     LOG_WARN("ObDropIndexTask has not been inited", K(ret));
-  } else if (OB_FAIL(switch_status(new_status, ret))) {
+  } else if (OB_FAIL(switch_status(new_status, true, ret))) {
     LOG_WARN("switch status failed", K(ret));
   }
   return ret;
 }
 
-int ObDropIndexTask::set_write_only(const ObDDLTaskStatus new_status)
+// Disused stage, just for compatibility.
+int ObDropIndexTask::set_write_only(const share::ObDDLTaskStatus new_status)
 {
   int ret = OB_SUCCESS;
-  DEBUG_SYNC(DROP_INDEX_SET_WRITE_ONLY);
   if (OB_UNLIKELY(!is_inited_)) {
     ret = OB_NOT_INIT;
     LOG_WARN("ObDropIndexTask has not been inited", K(ret));
-  } else if (OB_FAIL(update_index_status(INDEX_STATUS_UNAVAILABLE))) {
-    LOG_WARN("update index status failed", K(ret));
-  } else if (OB_FAIL(switch_status(new_status, ret))) {
+  } else if (OB_FAIL(switch_status(new_status, true, ret))) {
     LOG_WARN("switch status failed", K(ret));
   }
   return ret;
@@ -179,7 +183,7 @@ int ObDropIndexTask::set_unusable(const ObDDLTaskStatus new_status)
     LOG_WARN("ObDropIndexTask has not been inited", K(ret));
   } else if (OB_FAIL(update_index_status(INDEX_STATUS_UNUSABLE))) {
     LOG_WARN("update index status failed", K(ret));
-  } else if (OB_FAIL(switch_status(new_status, ret))) {
+  } else if (OB_FAIL(switch_status(new_status, true, ret))) {
     LOG_WARN("switch status failed", K(ret));
   }
   return ret;
@@ -247,7 +251,7 @@ int ObDropIndexTask::drop_index(const ObDDLTaskStatus new_status)
   int ret = OB_SUCCESS;
   if (OB_FAIL(drop_index_impl())) {
     LOG_WARN("send drop index rpc failed", K(ret));
-  } else if (OB_FAIL(switch_status(new_status, ret))) {
+  } else if (OB_FAIL(switch_status(new_status, true, ret))) {
     LOG_WARN("switch status failed", K(ret));
   }
   return ret;
@@ -269,7 +273,7 @@ int ObDropIndexTask::fail()
   return ret;
 }
 
-int ObDropIndexTask::cleanup()
+int ObDropIndexTask::cleanup_impl()
 {
   int ret = OB_SUCCESS;
   ObString unused_str;
@@ -302,6 +306,7 @@ int ObDropIndexTask::process()
   } else if (OB_FAIL(check_switch_succ())) {
     LOG_WARN("check need retry failed", K(ret));
   } else {
+    ddl_tracing_.restore_span_hierarchy();
     const ObDDLTaskStatus status = static_cast<ObDDLTaskStatus>(task_status_);
     switch (status) {
       case ObDDLTaskStatus::PREPARE:
@@ -311,7 +316,7 @@ int ObDropIndexTask::process()
         break;
       case ObDDLTaskStatus::SET_WRITE_ONLY:
         if (OB_FAIL(set_write_only(WAIT_TRANS_END_FOR_WRITE_ONLY))) {
-          LOG_WARN("prepare failed", K(ret));
+          LOG_WARN("set write only failed", K(ret));
         }
         break;
       case ObDDLTaskStatus::WAIT_TRANS_END_FOR_WRITE_ONLY:
@@ -348,6 +353,7 @@ int ObDropIndexTask::process()
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("error unexpected, task status is not valid", K(ret), K(task_status_));
     }
+    ddl_tracing_.release_span_hierarchy();
   }
   return ret;
 }
@@ -408,6 +414,8 @@ int ObDropIndexTask::serialize_params_to_message(char *buf, const int64_t buf_si
     LOG_WARN("invalid arg", K(ret), KP(buf), K(buf_size));
   } else if (OB_FAIL(drop_index_arg_.serialize(buf, buf_size, pos))) {
     LOG_WARN("serialize failed", K(ret));
+  } else if (OB_FAIL(ddl_tracing_.serialize(buf, buf_size, pos))) {
+    LOG_WARN("fail to serialize ddl_flt_ctx", K(ret));
   }
   return ret;
 }
@@ -423,11 +431,65 @@ int ObDropIndexTask::deserlize_params_from_message(const char *buf, const int64_
     LOG_WARN("deserialize failed", K(ret));
   } else if (OB_FAIL(deep_copy_index_arg(allocator_, tmp_drop_index_arg, drop_index_arg_))) {
     LOG_WARN("deep copy drop index arg failed", K(ret));
+  } else {
+    if (pos < buf_size) {
+      if (OB_FAIL(ddl_tracing_.deserialize(buf, buf_size, pos))) {
+        LOG_WARN("fail to deserialize ddl_tracing_", K(ret));
+      }
+    }
   }
   return ret;
 }
 
 int64_t ObDropIndexTask::get_serialize_param_size() const
 {
-  return drop_index_arg_.get_serialize_size();
+  return drop_index_arg_.get_serialize_size() + ddl_tracing_.get_serialize_size();
+}
+
+void ObDropIndexTask::flt_set_task_span_tag() const
+{
+  FLT_SET_TAG(ddl_task_id, task_id_, ddl_parent_task_id, parent_task_id_,
+              ddl_data_table_id, object_id_, ddl_index_table_id, target_object_id_,
+              ddl_schema_version, schema_version_);
+}
+
+void ObDropIndexTask::flt_set_status_span_tag() const
+{
+  switch (task_status_) {
+  case ObDDLTaskStatus::PREPARE: {
+    FLT_SET_TAG(ddl_ret_code, ret_code_);
+    break;
+  }
+  case ObDDLTaskStatus::SET_WRITE_ONLY: {
+    FLT_SET_TAG(ddl_ret_code, ret_code_);
+    break;
+  }
+  case ObDDLTaskStatus::WAIT_TRANS_END_FOR_WRITE_ONLY: {
+    FLT_SET_TAG(ddl_data_table_id, object_id_, ddl_snapshot_version, snapshot_version_, ddl_ret_code, ret_code_);
+    break;
+  }
+  case ObDDLTaskStatus::SET_UNUSABLE: {
+    FLT_SET_TAG(ddl_ret_code, ret_code_);
+    break;
+  }
+  case ObDDLTaskStatus::WAIT_TRANS_END_FOR_UNUSABLE: {
+    FLT_SET_TAG(ddl_data_table_id, object_id_, ddl_snapshot_version, snapshot_version_, ddl_ret_code, ret_code_);
+    break;
+  }
+  case ObDDLTaskStatus::DROP_SCHEMA: {
+    FLT_SET_TAG(ddl_index_table_id, target_object_id_, ddl_ret_code, ret_code_);
+    break;
+  }
+  case ObDDLTaskStatus::FAIL: {
+    FLT_SET_TAG(ddl_ret_code, ret_code_);
+    break;
+  }
+  case ObDDLTaskStatus::SUCCESS: {
+    FLT_SET_TAG(ddl_ret_code, ret_code_);
+    break;
+  }
+  default: {
+    break;
+  }
+  }
 }

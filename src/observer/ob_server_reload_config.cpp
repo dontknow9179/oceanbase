@@ -87,6 +87,7 @@ int ObServerReloadConfig::operator()()
 {
   int ret = OB_SUCCESS;
   int real_ret = ret;
+
   if (!gctx_.is_inited()) {
     real_ret = ret = OB_INNER_STAT_ERROR;
     LOG_WARN("gctx not init", "gctx inited", gctx_.is_inited(), K(ret));
@@ -124,10 +125,20 @@ int ObServerReloadConfig::operator()()
       real_ret = ret;
       LOG_WARN("reload config for ratelimit manager fail", K(ret));
     }
+    if (OB_FAIL(ObTdeEncryptEngineLoader::get_instance().reload_config())) {
+      real_ret = ret;
+      LOG_WARN("reload config for tde encrypt engine fail", K(ret));
+    }
   }
   {
     GMEMCONF.reload_config(GCONF);
     const int64_t limit_memory = GMEMCONF.get_server_memory_limit();
+    OB_LOGGER.set_info_as_wdiag(GET_MIN_CLUSTER_VERSION() < CLUSTER_VERSION_4_1_0_0);
+    // reload log config again after get MIN_CLUSTER_VERSION
+    if (OB_FAIL(ObReloadConfig::operator()())) {
+      real_ret = ret;
+      LOG_WARN("ObReloadConfig operator() failed", K(ret));
+    }
     const int64_t reserved_memory = GCONF.cache_wash_threshold;
     const int64_t reserved_urgent_memory = GCONF.memory_reserved;
     LOG_INFO("set limit memory", K(limit_memory));
@@ -207,6 +218,8 @@ int ObServerReloadConfig::operator()()
 #else
   {
     sanity_set_whitelist(GCONF.sanity_whitelist.str());
+    ObMallocAllocator::get_instance()->enable_tenant_leak_memory_protection_ =
+      GCONF._enable_tenant_leak_memory_protection;
   }
 #endif
   {
@@ -245,10 +258,8 @@ int ObServerReloadConfig::operator()()
   // syslog bandwidth limitation
   share::ObTaskController::get().set_log_rate_limit(
       GCONF.syslog_io_bandwidth_limit.get_value());
-
-  if (nullptr != GCTX.omt_) {
-    GCTX.omt_->set_workers_per_cpu(GCONF.workers_per_cpu_quota.get_value());
-  }
+  share::ObTaskController::get().set_diag_per_error_limit(
+      GCONF.diag_syslog_per_error_limit.get_value());
 
   get_unis_global_compat_version() = GET_MIN_CLUSTER_VERSION();
   lib::g_runtime_enabled = true;
@@ -270,6 +281,10 @@ int ObServerReloadConfig::operator()()
       LOG_WARN("fail to resize file", KR(tmp_ret),
           K(data_disk_size), K(data_disk_percentage), K(reserved_size));
     }
+  }
+
+  {
+    ObSysVariables::set_value("datadir", GCONF.data_dir);
   }
   return real_ret;
 }

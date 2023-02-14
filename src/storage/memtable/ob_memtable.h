@@ -25,6 +25,8 @@
 #include "storage/memtable/ob_row_compactor.h"
 #include "storage/memtable/ob_multi_source_data.h"
 #include "storage/checkpoint/ob_freeze_checkpoint.h"
+#include "storage/compaction/ob_medium_compaction_mgr.h"
+#include "storage/tx_storage/ob_ls_handle.h" //ObLSHandle
 
 namespace oceanbase
 {
@@ -166,12 +168,13 @@ public:
   virtual ~ObMemtable();
 public:
   int init(const ObITable::TableKey &table_key,
-           storage::ObLS *ls,
+           ObLSHandle &ls_handle,
            storage::ObFreezer *freezer,
            storage::ObTabletMemtableMgr *memtable_mgr,
            const int64_t schema_version,
            const uint32_t freeze_clock);
   virtual void destroy();
+  virtual int safe_to_destroy(bool &is_safe);
 
   OB_INLINE void reset() { destroy(); }
 public:
@@ -283,7 +286,7 @@ public:
       storage::ObStoreRowIterator *&row_iter) override;
 
   // replay_row is used to replay rows in redo log for follower
-  // ctx is the writer tx's context, we need the log_ts, tx_id for fulfilling the tx node
+  // ctx is the writer tx's context, we need the scn, tx_id for fulfilling the tx node
   // mmi is mutator iterator for replay
   // decrypt_buf is used for decryption
   virtual int replay_row(
@@ -320,7 +323,7 @@ public:
   inline bool not_empty() const { return INT64_MAX != get_protection_clock(); };
   void set_max_schema_version(const int64_t schema_version);
   virtual int64_t get_max_schema_version() const override;
-  int row_compact(ObMvccRow *value, const bool for_replay, const int64_t snapshot_version);
+  int row_compact(ObMvccRow *value, const bool for_replay, const share::SCN snapshot_version);
   int64_t get_hash_item_count() const;
   int64_t get_hash_alloc_memory() const;
   int64_t get_btree_item_count() const;
@@ -331,12 +334,12 @@ public:
   virtual bool is_active_memtable() const override;
   virtual bool is_inner_tablet() const { return key_.tablet_id_.is_inner_tablet(); }
   ObTabletID get_tablet_id() const { return key_.tablet_id_; }
-  int set_snapshot_version(const int64_t snapshot_version);
+  int set_snapshot_version(const share::SCN snapshot_version);
   int64_t get_memtable_state() const { return state_; }
   int64_t get_freeze_state() const { return freeze_state_; }
   int64_t get_protection_clock() const { return local_allocator_.get_protection_clock(); }
   int64_t get_retire_clock() const { return local_allocator_.get_retire_clock(); }
-  int get_current_right_boundary(int64_t &current_right_boundary);
+  int get_current_right_boundary(share::SCN &current_right_boundary);
 
   inline bool& get_read_barrier() { return read_barrier_; }
   inline void set_write_barrier() { write_barrier_ = true; }
@@ -371,36 +374,36 @@ public:
 
   /* freeze */
   virtual int set_frozen() override { local_allocator_.set_frozen(); return OB_SUCCESS; }
-  virtual bool rec_log_ts_is_stable() override;
+  virtual bool rec_scn_is_stable() override;
   virtual bool ready_for_flush() override;
   void print_ready_for_flush();
   virtual int flush(share::ObLSID ls_id) override;
-  virtual int64_t get_rec_log_ts() override { return ATOMIC_LOAD(&rec_log_ts_); }
+  share::SCN get_rec_scn() { return rec_scn_.atomic_get(); }
   virtual bool is_frozen_checkpoint() const override { return is_frozen_memtable();}
   virtual bool is_active_checkpoint() const override { return is_active_memtable();}
 
-  virtual OB_INLINE int64_t get_end_log_ts() const override
+  virtual OB_INLINE share::SCN get_end_scn() const
   {
-    return ATOMIC_LOAD(&(key_.log_ts_range_.end_log_ts_));
+    return key_.scn_range_.end_scn_;
   }
-  virtual OB_INLINE int64_t get_start_log_ts() const override
+  virtual OB_INLINE share::SCN get_start_scn() const
   {
-    return ATOMIC_LOAD(&(key_.log_ts_range_.start_log_ts_));
+    return key_.scn_range_.start_scn_;
   }
-  bool is_empty()
+  bool is_empty() const override
   {
-    return get_end_log_ts() == get_start_log_ts() &&
-      ObLogTsRange::MIN_TS == get_max_end_log_ts();
+    return get_end_scn() == get_start_scn() &&
+      share::ObScnRange::MIN_SCN == get_max_end_scn();
   }
   int resolve_right_boundary();
-  void resolve_left_boundary(int64_t end_log_ts);
+  void resolve_left_boundary(share::SCN end_scn);
   int resolve_snapshot_version_();
-  int resolve_max_end_log_ts_();
-  int64_t get_max_end_log_ts() const { return ATOMIC_LOAD(&max_end_log_ts_); }
-  int set_rec_log_ts(int64_t rec_log_ts);
-  int set_start_log_ts(const int64_t start_ts);
-  int set_end_log_ts(const int64_t freeze_ts);
-  int set_max_end_log_ts(const int64_t log_ts);
+  int resolve_max_end_scn_();
+  share::SCN get_max_end_scn() const { return max_end_scn_.atomic_get(); }
+  int set_rec_scn(share::SCN rec_scn);
+  int set_start_scn(const share::SCN start_ts);
+  int set_end_scn(const share::SCN freeze_ts);
+  int set_max_end_scn(const share::SCN scn);
   inline int set_logging_blocked()
   {
     logging_blocked_start_time = common::ObTimeUtility::current_time();
@@ -432,29 +435,42 @@ public:
   blocksstable::ObDatumRange &m_get_real_range(blocksstable::ObDatumRange &real_range,
                                         const blocksstable::ObDatumRange &range, const bool is_reverse) const;
   int get_tx_table_guard(storage::ObTxTableGuard &tx_table_guard);
-  int set_migration_clog_checkpoint_ts(const int64_t clog_checkpoint_ts);
-  int64_t get_migration_clog_checkpoint_ts() { return ATOMIC_LOAD(&migration_clog_checkpoint_ts_); }
+  int set_migration_clog_checkpoint_scn(const share::SCN &clog_checkpoint_scn);
+  share::SCN get_migration_clog_checkpoint_scn() { return migration_clog_checkpoint_scn_.atomic_get(); }
   int resolve_right_boundary_for_migration();
+  void unset_logging_blocked_for_active_memtable();
+  void resolve_left_boundary_for_active_memtable();
 
   /* multi source data operations */
-  virtual int get_multi_source_data_unit(ObIMultiSourceDataUnit *multi_source_data_unit, ObIAllocator *allocator);
+  virtual int get_multi_source_data_unit(
+      ObIMultiSourceDataUnit *multi_source_data_unit,
+      ObIAllocator *allocator,
+      const bool get_lastest = true);
+  template<class T>
+  int get_multi_source_data_unit_list(
+      const T * const useless_unit,
+      ObMultiSourceData::ObIMultiSourceDataUnitList &dst_list,
+      ObIAllocator *allocator);
   bool has_multi_source_data_unit(const MultiSourceDataUnitType type) const;
 
   template<class T>
   int save_multi_source_data_unit(const T *const multi_source_data_unit,
-                                  const int64_t log_ts,
+                                  const share::SCN scn,
                                   const bool for_replay,
                                   const MemtableRefOp ref_op = MemtableRefOp::NONE,
                                   const bool is_callback = false);
   // Print stat data in log.
   // For memtable debug.
   int print_stat() const;
+  int check_cleanout(bool &is_all_cleanout,
+                     bool &is_all_delay_cleanout,
+                     int64_t &count);
   int dump2text(const char *fname);
   INHERIT_TO_STRING_KV("ObITable", ObITable, KP(this), K_(timestamp), K_(state),
                        K_(freeze_clock), K_(max_schema_version), K_(write_ref_cnt), K_(local_allocator),
                        K_(unsubmitted_cnt), K_(unsynced_cnt),
                        K_(logging_blocked), K_(unset_active_memtable_logging_blocked), K_(resolve_active_memtable_left_boundary),
-                       K_(contain_hotspot_row), K_(max_end_log_ts), K_(rec_log_ts), K_(snapshot_version), K_(migration_clog_checkpoint_ts),
+                       K_(contain_hotspot_row), K_(max_end_scn), K_(rec_scn), K_(snapshot_version), K_(migration_clog_checkpoint_scn),
                        K_(is_tablet_freeze), K_(is_force_freeze), K_(contain_hotspot_row),
                        K_(read_barrier), K_(is_flushed), K_(freeze_state));
 private:
@@ -470,10 +486,11 @@ private:
 
   int lock_row_on_frozen_stores_(
       storage::ObStoreCtx &ctx,
+      const ObTxNodeArg &arg,
       const ObMemtableKey *key,
       ObMvccRow *value,
       const storage::ObTableReadInfo &read_info,
-      storage::ObStoreRowLockState &lock_state);
+      ObMvccWriteResult &res);
 
   int remove_unused_callback_for_uncommited_txn_();
 
@@ -512,7 +529,7 @@ private:
 private:
   DISALLOW_COPY_AND_ASSIGN(ObMemtable);
   bool is_inited_;
-  storage::ObLS *ls_;
+  storage::ObLSHandle ls_handle_;
   storage::ObFreezer *freezer_;
   storage::ObTabletMemtableMgr *memtable_mgr_;
   uint32_t freeze_clock_;
@@ -529,13 +546,13 @@ private:
   int64_t logging_blocked_start_time; // record the start time of logging blocked
   bool unset_active_memtable_logging_blocked_;
   bool resolve_active_memtable_left_boundary_;
-  int64_t freeze_log_ts_;
-  int64_t max_end_log_ts_;
-  int64_t rec_log_ts_;
+  share::SCN freeze_scn_;
+  share::SCN max_end_scn_;
+  share::SCN rec_scn_;
   int64_t state_;
   int64_t freeze_state_;
   int64_t timestamp_;
-  int64_t migration_clog_checkpoint_ts_;
+  share::SCN migration_clog_checkpoint_scn_;
   bool is_tablet_freeze_;
   bool is_force_freeze_;
   bool is_flushed_;
@@ -551,7 +568,7 @@ private:
 
 template<class T>
 int ObMemtable::save_multi_source_data_unit(const T *const multi_source_data_unit,
-                                            const int64_t log_ts,
+                                            const share::SCN scn,
                                             const bool for_replay,
                                             const MemtableRefOp ref_op,
                                             const bool is_callback)
@@ -585,19 +602,19 @@ int ObMemtable::save_multi_source_data_unit(const T *const multi_source_data_uni
           TRANS_LOG(WARN, "fail to inc_cnt_for_multi_data", K(multi_source_data_unit), K(type), KPC(this));
         }
       }
-      if (log_ts > get_start_log_ts() && log_ts < ObLogTsRange::MAX_TS) {
+      if (scn > get_start_scn() && scn < share::ObScnRange::MAX_SCN) {
         if (OB_FAIL(ret)) {
-        } 
-        // skip updating max_end_log_ts of frozen memtable for commit/abort when replay clog.
-        else if ((!for_replay || !is_callback)
-                 && OB_FAIL(set_max_end_log_ts(log_ts))) {
-          TRANS_LOG(WARN, "failed to set max_end_log_ts", K(ret), K(log_ts), KPC(this));
-        } else if (OB_FAIL(set_rec_log_ts(log_ts))) {
-          TRANS_LOG(WARN, "failed to set rec_log_ts", K(ret), K(log_ts), KPC(this));
         }
-      } else if (-1 != log_ts &&  ObLogTsRange::MAX_TS != log_ts) {
+        // skip updating max_end_scn of frozen memtable for commit/abort when replay clog.
+        else if ((!for_replay || !is_callback)
+                 && OB_FAIL(set_max_end_scn(scn))) {
+          TRANS_LOG(WARN, "failed to set max_end_scn", K(ret), K(scn), KPC(this));
+        } else if (OB_FAIL(set_rec_scn(scn))) {
+          TRANS_LOG(WARN, "failed to set rec_scn", K(ret), K(scn), KPC(this));
+        }
+      } else if (share::SCN::invalid_scn() != scn && share::ObScnRange::MAX_SCN != scn) {
         ret = common::OB_ERR_UNEXPECTED;
-        TRANS_LOG(WARN, "invalid log_ts", K(ret), K(log_ts), KPC(this));
+        TRANS_LOG(WARN, "invalid scn", K(ret), K(scn), KPC(this));
       }
 
       if (MemtableRefOp::DEC_REF == ref_op) {
@@ -609,8 +626,30 @@ int ObMemtable::save_multi_source_data_unit(const T *const multi_source_data_uni
         }
       }
     }
-    TRANS_LOG(INFO, "memtable save multi source data unit", K(ret), K(log_ts), K(ref_op),
+    TRANS_LOG(INFO, "memtable save multi source data unit", K(ret), K(scn), K(ref_op),
               KPC(multi_source_data_unit), K(type), KPC(this));
+  }
+
+  return ret;
+}
+
+template<class T>
+int ObMemtable::get_multi_source_data_unit_list(
+    const T * const useless_unit,
+    ObMultiSourceData::ObIMultiSourceDataUnitList &dst_list,
+    ObIAllocator *allocator)
+{
+  int ret = OB_SUCCESS;
+  TCRLockGuard guard(multi_source_data_lock_);
+
+  if (IS_NOT_INIT) {
+    ret = OB_NOT_INIT;
+    TRANS_LOG(WARN, "not inited", K(ret));
+  } else if (OB_UNLIKELY(!multi_source_data_.is_valid())) {
+    ret = OB_ERR_UNEXPECTED;
+    TRANS_LOG(WARN, "multi source data is invalid", K(ret));
+  } else if (OB_FAIL(multi_source_data_.get_multi_source_data_unit_list(useless_unit, dst_list, allocator))) {
+    TRANS_LOG(WARN, "fail to get multi source data unit", K(ret));
   }
 
   return ret;

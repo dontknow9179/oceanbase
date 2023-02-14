@@ -515,12 +515,12 @@ bool ObDatumRow::operator==(const ObDatumRow &other) const
   bool is_equal = true;
   if (count_ != other.count_) {
     is_equal = false;
-    STORAGE_LOG(WARN, "datum row count no equal", K(other), K(*this));
+    STORAGE_LOG_RET(WARN, OB_INVALID_ARGUMENT, "datum row count no equal", K(other), K(*this));
   } else {
     for (int64_t i = 0; is_equal && i < count_; i++) {
       is_equal = storage_datums_[i] == other.storage_datums_[i];
       if (!is_equal) {
-        STORAGE_LOG(WARN, "obj and datum no equal", K(i), K(other), K(*this));
+        STORAGE_LOG_RET(WARN, OB_ERR_UNEXPECTED, "obj and datum no equal", K(i), K(other), K(*this));
       }
     }
   }
@@ -532,13 +532,13 @@ bool ObDatumRow::operator==(const ObNewRow &other) const
   bool is_equal = true;
   if (count_ != other.count_) {
     is_equal = false;
-    STORAGE_LOG(WARN, "datum row count no equal", K(other), K(*this));
+    STORAGE_LOG_RET(WARN, OB_INVALID_ARGUMENT, "datum row count no equal", K(other), K(*this));
   } else {
     int ret = OB_SUCCESS;
     for (int64_t i = 0; is_equal && i < count_; i++) {
       is_equal = storage_datums_[i] == other.cells_[i];
       if (!is_equal) {
-        STORAGE_LOG(WARN, "obj and datum no equal", K(i), K(other), K(*this));
+        STORAGE_LOG_RET(WARN, OB_ERR_UNEXPECTED, "obj and datum no equal", K(i), K(other), K(*this));
       }
     }
   }
@@ -633,9 +633,12 @@ int ObStorageDatumUtils::init(const ObIArray<share::schema::ObColDesc> &col_desc
         const share::schema::ObColDesc &col_desc = mv_col_descs.at(i);
         //TODO @hanhui support desc rowkey
         bool is_ascending = true || col_desc.col_order_ == ObOrderType::ASC;
+        bool has_lob_header = is_lob_storage(col_desc.col_type_.get_type());
         sql::ObExprBasicFuncs *basic_funcs = ObDatumFuncs::get_basic_func(col_desc.col_type_.get_type(),
                                                                           col_desc.col_type_.get_collation_type(),
-                                                                          is_oracle_mode);
+                                                                          col_desc.col_type_.get_scale(),
+                                                                          is_oracle_mode,
+                                                                          has_lob_header);
         if (OB_UNLIKELY(nullptr == basic_funcs
                        || nullptr == basic_funcs->null_last_cmp_
                        || nullptr == basic_funcs->murmur_hash_)) {

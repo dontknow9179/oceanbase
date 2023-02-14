@@ -40,7 +40,7 @@ static inline void prepare_palf_base_info(const obrpc::ObCreateLSArg &arg,
                                           palf::PalfBaseInfo &palf_base_info)
 {
   palf_base_info.generate_by_default();
-  palf_base_info.prev_log_info_.log_ts_ = arg.get_create_scn();
+  palf_base_info.prev_log_info_.scn_ = arg.get_create_scn();
   if (arg.is_create_ls_with_palf()) {
     palf_base_info = arg.get_palf_base_info();
   }
@@ -53,6 +53,7 @@ ObLSService::ObLSService()
     ls_map_(),
     ls_allocator_(),
     iter_allocator_(),
+    change_lock_(common::ObLatchIds::LS_CHANGE_LOCK),
     rs_reporter_(nullptr),
     storage_svr_rpc_proxy_(),
     storage_rpc_(),
@@ -246,7 +247,7 @@ int ObLSService::inner_create_ls_(const share::ObLSID &lsid,
                                   const ObReplicaType replica_type,
                                   const ObMigrationStatus &migration_status,
                                   const ObLSRestoreStatus &restore_status,
-                                  const int64_t create_scn,
+                                  const SCN &create_scn,
                                   ObLS *&ls)
 {
   int ret = OB_SUCCESS;
@@ -386,7 +387,7 @@ int ObLSService::create_ls(const obrpc::ObCreateLSArg &arg)
   bool need_retry = true;
   bool ls_exist = false;
   bool waiting_destroy = false;
-  const int64_t create_scn = arg.get_create_scn();
+  const SCN create_scn = arg.get_create_scn();
   palf::PalfBaseInfo palf_base_info;
   const ObMigrationStatus migration_status = ObMigrationStatus::OB_MIGRATION_STATUS_NONE;
   lib::ObMutexGuard change_guard(change_lock_);
@@ -451,20 +452,29 @@ int ObLSService::create_ls(const obrpc::ObCreateLSArg &arg)
       // inner tablet reverted by inner_del_ls_ if fail to create
       // only restore ls with base will not need create inner tablet
     } else if (need_create_inner_tablets_(arg) &&
-               OB_FAIL(ls->create_ls_inner_tablet(arg.get_compat_mode(), arg.get_create_scn()))) {
+               OB_FAIL(ls->create_ls_inner_tablet(arg.get_compat_mode(),
+                                                  arg.get_create_scn()))) {
       LOG_WARN("create ls inner tablet failed", K(ret), K(arg));
     } else if (OB_FAIL(write_commit_create_ls_slog_(ls->get_ls_id()))) {
       LOG_WARN("fail to write create log stream commit slog", K(ret), K(ls_meta));
     } else {
       state = ObLSCreateState::CREATE_STATE_FINISH;
       ls->finish_create(is_commit);
-      if (OB_SUCCESS != (tmp_ret = ls->start())) {
-        LOG_ERROR("ls start failed", K(tmp_ret), K(arg));
-      } else {
-        FLOG_INFO("add ls to ls service succ", K(ls->get_ls_id()), K(arg));
-        if (OB_SUCCESS != (tmp_ret = ls->report_replica_info())) {
-          LOG_WARN("fail to report ls", KR(tmp_ret), K(arg));
+      if (OB_FAIL(ls->start())) {
+        LOG_ERROR("ls start failed", K(ret), K(arg));
+      } else if (is_ls_to_restore_(arg)) {
+        if (OB_FAIL(ls->offline_without_lock())) {
+          LOG_WARN("failed to offline", K(ret), K(arg));
+        } else if (OB_FAIL(ls->get_log_handler()->enable_sync())) {
+          LOG_WARN("failed to enable sync", K(ret), K(arg));
+        } else if (OB_FAIL(ls->get_ls_restore_handler()->online())) {
+          LOG_WARN("failed to online restore handler", K(ret), K(arg));
         }
+      }
+
+      FLOG_INFO("add ls to ls service succ", K(ls->get_ls_id()), K(arg));
+      if (OB_SUCCESS != (tmp_ret = ls->report_replica_info())) {
+        LOG_WARN("fail to report ls", KR(tmp_ret), K(arg));
       }
     }
     if (OB_FAIL(ret)) {
@@ -735,7 +745,7 @@ int ObLSService::restore_update_ls_(const ObLSMetaPackage &meta_package)
   } else if (OB_ISNULL(ls = ls_handle.get_ls())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("ls is null", K(meta_package));
-  } else if (OB_FAIL(ls->set_clog_checkpoint(ls_meta.get_clog_base_lsn(), ls_meta.get_clog_checkpoint_ts()))) {
+  } else if (OB_FAIL(ls->set_clog_checkpoint(ls_meta.get_clog_base_lsn(), ls_meta.get_clog_checkpoint_scn()))) {
     LOG_WARN("failed to set clog checkpoint", K(meta_package));
   } else if (OB_FAIL(ls->advance_base_info(meta_package.palf_meta_, is_rebuild))) {
     LOG_WARN("failed to advance base lsn", K(meta_package));
@@ -780,7 +790,7 @@ int ObLSService::replay_create_ls_(const ObLSMeta &ls_meta)
                                       ls_meta.replica_type_,
                                       migration_status,
                                       restore_status,
-                                      ls_meta.get_clog_checkpoint_ts(),
+                                      ls_meta.get_clog_checkpoint_scn(),
                                       ls))) {
     LOG_WARN("fail to inner create ls", K(ret), K(ls_meta.ls_id_));
   } else if (FALSE_IT(state = ObLSCreateState::CREATE_STATE_INNER_CREATED)) {
@@ -825,9 +835,6 @@ int ObLSService::get_ls(
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
     LOG_WARN("not init", K(ret));
-  } else if (OB_UNLIKELY(!is_running_)) {
-    ret = OB_NOT_RUNNING;
-    LOG_WARN("ls service is not running.", K(ret));
   } else if (OB_UNLIKELY(!ls_id.is_valid())) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid argument", K(ls_id));
@@ -1000,7 +1007,7 @@ int ObLSService::create_ls_for_ha(
                                       arg.dst_.get_replica_type(),
                                       migration_status,
                                       restore_status,
-                                      0, /* create scn */
+                                      ObScnRange::MIN_SCN, /* create scn */
                                       ls))) {
     LOG_WARN("create ls failed", K(ret), K(arg), K(task_id));
   } else {
@@ -1077,12 +1084,12 @@ void ObLSService::del_ls_after_create_ls_failed_(ObLSCreateState& ls_create_stat
       if (ls_create_state >= ObLSCreateState::CREATE_STATE_ADDED_TO_MAP) {
         if (OB_SUCCESS != (tmp_ret = remove_ls_from_map_(ls->get_ls_id()))) {
           need_retry = true;
-          LOG_ERROR("remove ls from map failed", K(tmp_ret));
+          LOG_ERROR_RET(tmp_ret, "remove ls from map failed", K(tmp_ret));
         }
       } else if (ls_create_state >= ObLSCreateState::CREATE_STATE_INNER_CREATED) {
         if (OB_SUCCESS != (tmp_ret = inner_del_ls_(ls))) {
           need_retry = true;
-          LOG_ERROR("inner del ls failed.", K(tmp_ret));
+          LOG_ERROR_RET(tmp_ret, "inner del ls failed.", K(tmp_ret));
         }
       }
     } while (need_retry);
@@ -1097,9 +1104,6 @@ int ObLSService::check_ls_exist(const share::ObLSID &ls_id, bool &exist)
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
     LOG_WARN("not init", K(ret));
-  } else if (OB_UNLIKELY(!is_running_)) {
-    ret = OB_NOT_RUNNING;
-    LOG_WARN("ls service is not running.", K(ret));
   } else if (OB_UNLIKELY(!ls_id.is_valid())) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid argument", K(ret), K(ls_id));
@@ -1127,9 +1131,6 @@ int ObLSService::check_ls_waiting_safe_destroy(const share::ObLSID &ls_id, bool 
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
     LOG_WARN("not init", K(ret));
-  } else if (OB_UNLIKELY(!is_running_)) {
-    ret = OB_NOT_RUNNING;
-    LOG_WARN("ls service is not running.", K(ret));
   } else if (OB_UNLIKELY(!ls_id.is_valid())) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid argument", K(ret), K(ls_id));
@@ -1158,9 +1159,6 @@ int ObLSService::get_ls_iter(common::ObSharedGuard<ObLSIterator> &guard, ObLSGet
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
     LOG_WARN("not init", K(ret));
-  } else if (OB_UNLIKELY(!is_running_)) {
-    ret = OB_NOT_RUNNING;
-    LOG_WARN("ls service is not running.", K(ret));
   } else if (NULL == (buf = iter_allocator_.alloc(sizeof(ObLSIterator), attr))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_ERROR("Fail to allocate memory for log stream iterator.", K(ret));
@@ -1204,7 +1202,7 @@ int ObLSService::create_tablet(const obrpc::ObBatchCreateTabletArg &batch_arg,
   } else if (OB_ISNULL(ls = handle.get_ls())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("log stream is null, unexpected error", K(ret), K(ls_id));
-  } else if (OB_FAIL(ls->batch_create_tablets(batch_arg, OB_INVALID_TIMESTAMP/*log_ts*/, is_replay))) {
+  } else if (OB_FAIL(ls->batch_create_tablets(batch_arg, SCN(), is_replay))) {
     LOG_WARN("batch create tablet failed", K(ret), K(batch_arg));
   } else {
     // do nothing
