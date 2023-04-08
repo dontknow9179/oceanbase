@@ -87,11 +87,14 @@ struct ObLSVTInfo
   //TODO SCN
   int64_t checkpoint_lsn_;
   int64_t rebuild_seq_;
+  share::SCN tablet_change_checkpoint_scn_;
 };
 
 // 诊断虚表统计信息
 struct DiagnoseInfo
 {
+  DiagnoseInfo() { reset(); }
+  ~DiagnoseInfo() { reset(); }
   bool is_role_sync() {
     return ((palf_diagnose_info_.election_role_ == palf_diagnose_info_.palf_role_)
            && (palf_diagnose_info_.palf_role_ == log_handler_diagnose_info_.log_handler_role_));
@@ -104,6 +107,7 @@ struct DiagnoseInfo
   logservice::ReplayDiagnoseInfo replay_diagnose_info_;
   logservice::GCDiagnoseInfo gc_diagnose_info_;
   checkpoint::CheckpointDiagnoseInfo checkpoint_diagnose_info_;
+  logservice::RestoreDiagnoseInfo restore_diagnose_info_;
   TO_STRING_KV(K(ls_id_),
                K(log_handler_diagnose_info_),
                K(palf_diagnose_info_),
@@ -111,7 +115,19 @@ struct DiagnoseInfo
                K(apply_diagnose_info_),
                K(replay_diagnose_info_),
                K(gc_diagnose_info_),
-               K(checkpoint_diagnose_info_));
+               K(checkpoint_diagnose_info_),
+               K(restore_diagnose_info_));
+  void reset() {
+    ls_id_ = -1;
+    log_handler_diagnose_info_.reset();
+    palf_diagnose_info_.reset();
+    rc_diagnose_info_.reset();
+    apply_diagnose_info_.reset();
+    replay_diagnose_info_.reset();
+    gc_diagnose_info_.reset();
+    checkpoint_diagnose_info_.reset();
+    restore_diagnose_info_.reset();
+  }
 };
 
 class ObIComponentFactory;

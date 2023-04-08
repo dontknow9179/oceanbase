@@ -1,6 +1,6 @@
 // Copyright (c) 2022-present Oceanbase Inc. All Rights Reserved.
 // Author:
-//   suzhi.yt <suzhi.yt@oceanbase.com>
+//   suzhi.yt <>
 
 #pragma once
 
@@ -64,8 +64,6 @@ public:
   int flush(int32_t session_id);
   int clean_up(int32_t session_id);
 public:
-  void set_is_flush() { is_flush_ = true; }
-  bool is_flush() const { return is_flush_; }
   int64_t get_ref_count() const { return ATOMIC_LOAD(&ref_count_); }
   int64_t inc_ref_count() { return ATOMIC_AAF(&ref_count_, 1); }
   int64_t dec_ref_count() { return ATOMIC_AAF(&ref_count_, -1); }
@@ -96,7 +94,8 @@ private:
   common::ObCollationType collation_type_;
   common::ObTimeZoneInfo tz_info_;
   ObTableLoadTimeConverter time_cvrt_;
-  const common::ObIArray<share::schema::ObColDesc> *column_descs_;
+  // does not contain hidden primary key columns
+  // and does not contain virtual generated columns
   common::ObArray<const share::schema::ObColumnSchemaV2 *> column_schemas_;
   struct SessionContext
   {
@@ -111,8 +110,8 @@ private:
   };
   SessionContext *session_ctx_array_;
   int64_t ref_count_ CACHE_ALIGNED;
-  bool is_flush_;
   bool is_inited_;
+  ObSchemaGetterGuard schema_guard_;
 };
 
 } // namespace observer

@@ -196,16 +196,16 @@ public:
                                                             prev_lsn,
                                                             curr_lsn,
                                                             write_buf))) {
-      PALF_LOG(ERROR,
-               "LogNetService submit_group_entry_to_memberlist failed",
-               K(ret),
-               KPC(this),
-               K(member_list),
-               K(prev_log_proposal_id),
-               K(prev_lsn),
-               K(prev_log_proposal_id),
-               K(curr_lsn),
-               K(write_buf));
+      // PALF_LOG(ERROR,
+      //          "LogNetService submit_group_entry_to_memberlist failed",
+      //          K(ret),
+      //          KPC(this),
+      //          K(member_list),
+      //          K(prev_log_proposal_id),
+      //          K(prev_lsn),
+      //          K(prev_log_proposal_id),
+      //          K(curr_lsn),
+      //          K(write_buf));
     } else {
       PALF_LOG(TRACE,
                "submit_group_entry_to_memberlist success",
@@ -415,8 +415,8 @@ private:
   int update_config_meta_guarded_by_lock_(const LogConfigMeta &meta, LogMeta &log_meta);
   int try_clear_up_holes_and_check_storage_integrity_(
       const LSN &last_entry_begin_lsn,
-      const LogGroupEntryHeader &last_group_entry_header,
-      const block_id_t &expected_next_block_id);
+      const block_id_t &expected_next_block_id,
+      LogGroupEntryHeader &last_group_entry_header);
   bool check_last_block_whether_is_integrity_(const block_id_t expected_next_block_id,
                                               const block_id_t max_block_id,
                                               const LSN &log_storage_tail);

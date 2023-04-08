@@ -97,7 +97,8 @@ ObSchemaGetterGuard::ObSchemaGetterGuard()
     schema_guard_type_(INVALID_SCHEMA_GUARD_TYPE),
     is_standby_cluster_(false),
     restore_tenant_exist_(false),
-    is_inited_(false)
+    is_inited_(false),
+    pin_cache_size_(0)
 {
 }
 
@@ -112,13 +113,18 @@ ObSchemaGetterGuard::ObSchemaGetterGuard(const ObSchemaMgrItem::Mod mod)
     schema_guard_type_(INVALID_SCHEMA_GUARD_TYPE),
     is_standby_cluster_(false),
     restore_tenant_exist_(false),
-    is_inited_(false)
+    is_inited_(false),
+    pin_cache_size_(0)
 {
 }
 
 ObSchemaGetterGuard::~ObSchemaGetterGuard()
 {
   // Destruct handles_ will reduce reference count automatically.
+  if (pin_cache_size_ >= FULL_SCHEMA_MEM_THREHOLD) {
+    int ret = OB_SUCCESS;
+    FLOG_WARN("hold too much full schema memory", K(tenant_id_), K(pin_cache_size_), K(lbt()));
+  }
 }
 
 int ObSchemaGetterGuard::init(
@@ -130,6 +136,7 @@ int ObSchemaGetterGuard::init(
     LOG_WARN("init twice", KR(ret));
   } else {
     is_standby_cluster_ = is_standby_cluster;
+    pin_cache_size_ = 0;
     is_inited_ = true;
   }
   return ret;
@@ -143,8 +150,10 @@ int ObSchemaGetterGuard::reset()
 
   is_standby_cluster_ = false;
   restore_tenant_exist_ = false;
-
-
+  if (pin_cache_size_ >= FULL_SCHEMA_MEM_THREHOLD) {
+    FLOG_WARN("hold too much full schema memory", K(tenant_id_), K(pin_cache_size_), K(lbt()));
+  }
+  pin_cache_size_ = 0;
   tenant_id_ = OB_INVALID_TENANT_ID;
 
   for (int64_t i = 0; i < schema_mgr_infos_.count(); i++) {
@@ -2542,7 +2551,10 @@ int ObSchemaGetterGuard::verify_table_read_only(const uint64_t tenant_id,
   int ret = OB_SUCCESS;
   const ObString &db_name = need_priv.db_;
   const ObString &table_name = need_priv.table_;
+  const ObPrivSet &priv_set = need_priv.priv_set_;
   const ObTableSchema *table_schema = NULL;
+  const ObPrivSet &read_only_privs = OB_PRIV_SELECT | OB_PRIV_SHOW_VIEW | OB_PRIV_SHOW_DB |
+                                     OB_PRIV_READ;
   // FIXME: is it right?
   const bool is_index = false;
   if (OB_FAIL(check_tenant_schema_guard(tenant_id))) {
@@ -2550,7 +2562,7 @@ int ObSchemaGetterGuard::verify_table_read_only(const uint64_t tenant_id,
   } else if (OB_FAIL(get_table_schema(tenant_id, db_name, table_name, is_index, table_schema))) {
     LOG_WARN("get table schema failed", KR(ret), K(tenant_id), K(db_name), K(table_name));
   } else if (NULL != table_schema) {
-    if (table_schema->is_read_only()) {
+    if (table_schema->is_read_only() && OB_PRIV_HAS_OTHER(priv_set, read_only_privs)) {
       ret = OB_ERR_TABLE_READ_ONLY;
       LOG_USER_ERROR(OB_ERR_TABLE_READ_ONLY, db_name.length(), db_name.ptr(),
                      table_name.length(), table_name.ptr());
@@ -4152,7 +4164,7 @@ inline bool ObSchemaGetterGuard::check_inner_stat() const
 }
 
 // OB_INVALID_VERSION means schema doesn't exist.
-// bugfix: https://aone.alibaba-inc.com/issue/17565984
+// bugfix:
 int ObSchemaGetterGuard::get_schema_version(
     const ObSchemaType schema_type,
     const uint64_t tenant_id,
@@ -4419,6 +4431,14 @@ int ObSchemaGetterGuard::put_to_local_cache(
     schema_obj.schema_id_ = schema_id;
     schema_obj.schema_ = const_cast<ObSchema*>(schema);
     schema_obj.handle_.move_from(handle);
+    if (schema_obj.handle_.is_valid()
+        && OB_NOT_NULL(schema)
+        && pin_cache_size_ < FULL_SCHEMA_MEM_THREHOLD) {
+        pin_cache_size_ += schema->get_convert_size();
+      if (pin_cache_size_ >= FULL_SCHEMA_MEM_THREHOLD) {
+        FLOG_WARN("hold too much full schema memory", K(tenant_id), K(pin_cache_size_), K(lbt()));
+      }
+    }
   }
   return ret;
 }
@@ -4615,6 +4635,32 @@ const ObTenantSchema *ObSchemaGetterGuard::get_tenant_info(const ObString &tenan
   }
   return OB_SUCC(ret) ? tenant_info : NULL;
 }
+
+#define GET_SIMPLE_SCHEMAS_IN_TENANT_FUNC_DEFINE(SCHEMA, SIMPLE_SCHEMA_TYPE) \
+  int ObSchemaGetterGuard::get_##SCHEMA##_schemas_in_tenant(                       \
+      const uint64_t tenant_id, ObIArray<const SIMPLE_SCHEMA_TYPE*> &schema_array)       \
+  {                                                                                \
+    int ret = OB_SUCCESS;                                                          \
+    const ObSchemaMgr *mgr = NULL;                                                 \
+    schema_array.reset();                                                          \
+    if (!check_inner_stat()) {                                                     \
+      ret = OB_INNER_STAT_ERROR;                                                   \
+      LOG_WARN("inner stat error", KR(ret));                                        \
+    } else if (OB_INVALID_ID == tenant_id) {                                       \
+      ret = OB_INVALID_ARGUMENT;                                                   \
+      LOG_WARN("invalid argument", KR(ret), K(tenant_id));                          \
+    } else if (OB_FAIL(check_tenant_schema_guard(tenant_id))) { \
+      LOG_WARN("fail to check tenant schema guard", KR(ret), K(tenant_id), K_(tenant_id)); \
+    } else if (OB_FAIL(check_lazy_guard(tenant_id, mgr))) { \
+      LOG_WARN("fail to check lazy guard", KR(ret), K(tenant_id)); \
+    } else if (OB_FAIL(mgr->get_##SCHEMA##_schemas_in_tenant(tenant_id,          \
+                                                              schema_array))) {  \
+      LOG_WARN("get "#SCHEMA" schemas in tenant failed", KR(ret), K(tenant_id));    \
+    }                                                                             \
+    return ret;                                                                   \
+  }
+GET_SIMPLE_SCHEMAS_IN_TENANT_FUNC_DEFINE(database, ObSimpleDatabaseSchema);
+#undef GET_SIMPLE_SCHEMAS_IN_TENANT_FUNC_DEFINE
 
 #define GET_SCHEMAS_IN_TENANT_FUNC_DEFINE(SCHEMA, SCHEMA_TYPE, SIMPLE_SCHEMA_TYPE, SCHEMA_TYPE_ENUM) \
   int ObSchemaGetterGuard::get_##SCHEMA##_schemas_in_tenant(                       \
@@ -5577,7 +5623,8 @@ int ObSchemaGetterGuard::get_object_with_synonym(const uint64_t tenant_id,
                                                  uint64_t &synonym_id,
                                                  ObString &obj_table_name,
                                                  bool &do_exist,
-                                                 bool search_public_schema) const
+                                                 bool search_public_schema,
+                                                 bool *is_public) const
 {
   int ret = OB_SUCCESS;
   const ObSchemaMgr *mgr = NULL;
@@ -5588,7 +5635,8 @@ int ObSchemaGetterGuard::get_object_with_synonym(const uint64_t tenant_id,
     LOG_WARN("fail to check lazy guard", KR(ret), K(tenant_id));
   } else {
     ret = mgr->synonym_mgr_.get_object(tenant_id, database_id, name, obj_database_id,
-                                       synonym_id, obj_table_name, do_exist, search_public_schema);
+                                       synonym_id, obj_table_name, do_exist, search_public_schema,
+                                       is_public);
   }
   return ret;
 }

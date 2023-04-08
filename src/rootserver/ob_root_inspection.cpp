@@ -227,6 +227,7 @@ ObTableGroupChecker::ObTableGroupChecker(share::schema::ObMultiVersionSchemaServ
     : schema_service_(schema_service),
       check_part_option_map_(),
       part_option_not_match_set_(),
+      allocator_(ObModIds::OB_SCHEMA),
       is_inited_(false)
 {
 }
@@ -283,6 +284,7 @@ int ObTableGroupChecker::inspect_(
 {
   int ret = OB_SUCCESS;
   ObSchemaGetterGuard schema_guard;
+  allocator_.reset();
   check_part_option_map_.reuse();
   part_option_not_match_set_.reuse();
   ObArray<uint64_t> table_ids;
@@ -297,11 +299,14 @@ int ObTableGroupChecker::inspect_(
     for (int64_t i = 0; OB_SUCC(ret) && i < table_ids.count(); i++) {
       const uint64_t table_id = table_ids.at(i);
       const ObTableSchema *table = NULL;
-      if (OB_FAIL(schema_guard.get_table_schema(tenant_id, table_id, table))) {
+      // schema guard cannot be used repeatedly in iterative logic,
+      // otherwise it will cause a memory hike in schema cache
+      if (OB_FAIL(schema_service_.get_tenant_schema_guard(tenant_id, schema_guard))) {
+        LOG_WARN("get schema guard failed", K(ret), K(tenant_id));
+      } else if (OB_FAIL(schema_guard.get_table_schema(tenant_id, table_id, table))) {
         LOG_WARN("get table schema failed", K(ret), KT(table_id));
       } else if (OB_ISNULL(table)) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("table not exist", K(ret), K(table_id));
+        //ignore table not exist
       } else if (is_sys_table(table->get_table_id()) || !table->has_partition()) {
         // skip, check the partitioned user table
       } else if (OB_FAIL(check_part_option(*table, schema_guard))) {
@@ -352,8 +357,11 @@ int ObTableGroupChecker::check_part_option(const ObTableSchema &table, ObSchemaG
       if (OB_FAIL(check_part_option_map_.get_refactored(tablegroup_id, table_in_map))) {
         //set into map while not in check_part_option_map_
         if (OB_HASH_NOT_EXIST == ret) {
-          if (OB_FAIL(check_part_option_map_.set_refactored(tablegroup_id, &table))) {
-            LOG_WARN("set table_schema in hashmap fail", K(ret), K(tablegroup_id), K(table));
+          ObTableSchema *new_table_schema = NULL;
+          if (OB_FAIL(ObSchemaUtils::alloc_schema(allocator_, table, new_table_schema))) {
+            LOG_WARN("alloc schema failed", K(ret), K(table));
+          } else if (OB_FAIL(check_part_option_map_.set_refactored(tablegroup_id, new_table_schema))) {
+            LOG_WARN("set table_schema in hashmap fail", K(ret), K(tablegroup_id), K(new_table_schema));
           }
         } else {
           LOG_WARN("check tablegroup_id in hashmap fail", K(ret), K(tablegroup_id));
@@ -832,14 +840,15 @@ int ObRootInspection::construct_tenant_ids_(
     LOG_WARN("not init", KR(ret));
   } else if (OB_FAIL(check_cancel())) {
     LOG_WARN("check_cancel failed", KR(ret));
-  } else if (OB_FAIL(ObAllTenantInfoProxy::get_standby_tenants(sql_proxy_, standby_tenants))) {
-    LOG_WARN("fail to get standby tenants", KR(ret));
   } else if (OB_FAIL(ObTenantUtils::get_tenant_ids(schema_service_, tmp_tenants))) {
     LOG_WARN("get_tenant_ids failed", KR(ret));
   } else {
+    bool is_standby = false;
     for (int64_t i = 0; OB_SUCC(ret) && i < tmp_tenants.count(); i++) {
       const uint64_t tenant_id = tmp_tenants.at(i);
-      if (has_exist_in_array(standby_tenants, tenant_id)) {
+      if (OB_FAIL(ObAllTenantInfoProxy::is_standby_tenant(sql_proxy_, tenant_id, is_standby))) {
+        LOG_WARN("fail to check is standby tenant", KR(ret), K(tenant_id));
+      } else if (is_standby) {
         // skip
       } else if (OB_FAIL(tenant_ids.push_back(tenant_id))) {
         LOG_WARN("fail to push back tenant_id", KR(ret), K(tenant_id));
@@ -936,9 +945,8 @@ int ObRootInspection::check_sys_stat_(const uint64_t tenant_id)
     LOG_WARN("schema_service is null", KR(ret));
   } else if (OB_FAIL(check_cancel())) {
     LOG_WARN("check_cancel failed", KR(ret));
-  } else if (!schema_service_->is_tenant_full_schema(tenant_id)) {
-    ret = OB_EAGAIN;
-    LOG_WARN("schema is not ready, try again", KR(ret), K(tenant_id));
+  } else if (OB_FAIL(check_tenant_status_(tenant_id))) {
+    LOG_WARN("fail to check tenant status", KR(ret), K(tenant_id));
   } else if (OB_FAIL(sys_stat.set_initial_values(tenant_id))) {
     LOG_WARN("set initial values failed", KR(ret), K(tenant_id));
   } else if (OB_FAIL(extra_cond.assign_fmt("tenant_id = %lu",
@@ -998,9 +1006,8 @@ int ObRootInspection::check_sys_param_(const uint64_t tenant_id)
     LOG_WARN("schema_service is null", KR(ret));
   } else if (OB_FAIL(check_cancel())) {
     LOG_WARN("check_cancel failed", KR(ret));
-  } else if (!schema_service_->is_tenant_full_schema(tenant_id)) {
-    ret = OB_EAGAIN;
-    LOG_WARN("schema is not ready, try again", KR(ret), K(tenant_id));
+  } else if (OB_FAIL(check_tenant_status_(tenant_id))) {
+    LOG_WARN("fail to check tenant status", KR(ret), K(tenant_id));
   } else if (OB_FAIL(extra_cond.assign_fmt("tenant_id = %lu",
              ObSchemaUtils::get_extract_tenant_id(exec_tenant_id, tenant_id)))) {
     LOG_WARN("extra_cond assign_fmt failed", KR(ret), K(tenant_id));
@@ -1270,15 +1277,6 @@ int ObRootInspection::check_sys_table_schemas_(
              || OB_INVALID_TENANT_ID == tenant_id)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid tenant_id", KR(ret), K(tenant_id));
-  } else if (OB_ISNULL(schema_service_)) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("schema_service is null", KR(ret));
-  } else if (OB_FAIL(schema_service_->get_tenant_refreshed_schema_version(
-                     tenant_id, schema_version))) {
-    LOG_WARN("fail to get tenant refreshed schema_version", KR(ret), K(tenant_id));
-  } else if (!ObSchemaService::is_formal_version(schema_version)) {
-    ret = OB_EAGAIN;
-    LOG_WARN("schema is not ready, try again", KR(ret), K(tenant_id), K(schema_version));
   } else {
     const schema_create_func *creator_ptr_array[] = {
       share::all_core_table_schema_creator,
@@ -1301,6 +1299,8 @@ int ObRootInspection::check_sys_table_schemas_(
         table_schema.reset();
         if (OB_FAIL(check_cancel())) {
           LOG_WARN("check_cancel failed", KR(ret));
+        } else if (OB_FAIL(check_tenant_status_(tenant_id))) {
+          LOG_WARN("fail to check tenant status", KR(ret), K(tenant_id));
         } else if (OB_FAIL((*creator_ptr)(table_schema))) {
           LOG_WARN("create table schema failed", KR(ret));
         } else if (!is_sys_tenant(tenant_id)
@@ -1325,6 +1325,10 @@ int ObRootInspection::check_sys_table_schemas_(
             LOG_WARN("check sys view failed", KR(tmp_ret), K(tenant_id),
                      "table_id", table_schema.get_table_id(), "table_name", table_schema.get_table_name());
             back_ret = OB_SUCCESS == back_ret ? tmp_ret : back_ret;
+            // sql may has occur other error except OB_SCHEMA_ERROR, we should not continue is such situation.
+            if (OB_SCHEMA_ERROR != tmp_ret) {
+              ret = OB_SUCC(ret) ? back_ret : tmp_ret;
+            }
           }
         }
       } // end for
@@ -1584,7 +1588,12 @@ int ObRootInspection::check_sys_view_(
         }
       }
       if (OB_FAIL(ret)) {
-        LOG_ERROR("check sys view: expand failed", KR(ret), K(tenant_id), K(table_name));
+        if (OB_ERR_VIEW_INVALID == ret) {
+          ret = OB_SCHEMA_ERROR;
+          LOG_ERROR("check sys view: expand failed", KR(ret), K(tenant_id), K(table_name));
+        } else {
+          LOG_WARN("check sys view: expand failed", KR(ret), K(tenant_id), K(table_name));
+        }
       } else if (OB_ISNULL(result = res.get_result())) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("failed to get sql result", KR(ret), K(tenant_id));
@@ -1864,6 +1873,8 @@ int ObRootInspection::check_data_version_()
     FOREACH_X(tenant_id, tenant_ids, OB_SUCC(ret)) {
       if (OB_FAIL(check_cancel())) {
         LOG_WARN("check_cancel failed", KR(ret));
+      } else if (OB_FAIL(check_tenant_status_(*tenant_id))) {
+        LOG_WARN("fail to check tenant status", KR(ret), K(*tenant_id));
       } else if (OB_TMP_FAIL(check_data_version_(*tenant_id))) {
         LOG_WARN("fail to check data version by tenant", KR(tmp_ret), K(*tenant_id));
         backup_ret = OB_SUCCESS == backup_ret ? tmp_ret : backup_ret;
@@ -1912,6 +1923,36 @@ int ObRootInspection::check_cancel()
   int ret = OB_SUCCESS;
   if (stopped_) {
     ret = OB_CANCELED;
+  }
+  return ret;
+}
+
+int ObRootInspection::check_tenant_status_(const uint64_t tenant_id)
+{
+  int ret = OB_SUCCESS;
+  ObSchemaGetterGuard guard;
+  const ObSimpleTenantSchema *tenant = NULL;
+  int64_t schema_version = OB_INVALID_VERSION;
+  if (OB_ISNULL(schema_service_)) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("schema service is null", KR(ret));
+  } else if (OB_FAIL(schema_service_->get_tenant_schema_guard(OB_SYS_TENANT_ID, guard))) {
+    LOG_WARN("fail to get schema guard", KR(ret));
+  } else if (OB_FAIL(guard.get_tenant_info(tenant_id, tenant))) {
+    LOG_WARN("fail to get tenant schema", KR(ret), K(tenant_id));
+  } else if (OB_ISNULL(tenant)) {
+    // tenant may has been dropped;
+    ret = OB_EAGAIN;
+    LOG_WARN("tenant may be dropped, don't continue", KR(ret), K(tenant_id));
+  } else if (!tenant->is_normal()) {
+    ret = OB_EAGAIN;
+    LOG_WARN("tenant status is not noraml, should check next round", KR(ret), K(tenant_id));
+  } else if (OB_FAIL(schema_service_->get_tenant_refreshed_schema_version(tenant_id, schema_version))) {
+    LOG_WARN("fail to get tenant schema version", KR(ret), K(tenant_id));
+  } else if (!ObSchemaService::is_formal_version(schema_version)) {
+    ret = OB_EAGAIN;
+    LOG_WARN("schema version is not formal, observer may be restarting or inner table schema changed, "
+             "should check next round", KR(ret), K(tenant_id), K(schema_version));
   }
   return ret;
 }

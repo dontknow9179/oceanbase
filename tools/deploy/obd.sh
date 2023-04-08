@@ -8,6 +8,24 @@ shopt -s expand_aliases
 source $DEPLOY_PATH/activate_obd.sh
 tag="latest"
 
+current_path=$(pwd)
+if [[ "$current_path" != "$BASE_DIR/tools/deploy" ]]
+then
+  echo "切换至路径[$BASE_DIR/tools/deploy]"
+  cd $BASE_DIR/tools/deploy || exit 1
+fi
+
+function absolute_path {
+  if [[ "$1" != "" ]]
+  then
+    if [[ $(echo "$1" | grep -E '^/') == "" ]]
+    then
+      echo ${current_path}/$1
+    else
+      echo $1
+    fi
+  fi
+}
 
 function obd_exec {
   echo -e "\033[32m>>> obd $* \033[0m"
@@ -41,11 +59,14 @@ function variables_parpare {
     DEP_PATH=$BASE_DIR/rpm/.dep_create/var
   fi
 
-  OBCLIENT_BIN=$DEP_PATH/u01/obclient/bin/obclient
-  MYSQLTEST_BIN=$DEP_PATH/u01/obclient/bin/mysqltest
+  export LD_LIBRARY_PATH=$DEP_PATH/u01/obclient/lib:$LD_LIBRARY_PATH
 
-  export OBD_HOME=$DEPLOY_PATH
-  export OBD_INSTALL_PRE=$DEP_PATH
+  OBCLIENT_BIN=$DEP_PATH/u01/obclient/bin/obclient
+  OBCLIENT_BIN_ARGS="--obclient-bin=$OBCLIENT_BIN"
+  MYSQLTEST_BIN=$DEP_PATH/u01/obclient/bin/mysqltest
+  MYSQLTEST_BIN_ARGS="--mysqltest-bin=$MYSQLTEST_BIN"
+  CLIENT_BIN_ARGS="$OBCLIENT_BIN_ARGS $MYSQLTEST_BIN_ARGS"
+
   DEFAULT_DEPLOY_NAME_FILE=$OBD_HOME/.obd/.default_deploy
 }
 
@@ -67,6 +88,11 @@ function mirror_create {
   fi
 
   # observer mirror create
+  if [[ "$OBSERVER_PATH" != "" ]]
+  then
+    mkdir -p $BASE_DIR/tools/deploy/{bin,etc,admin}
+    cp -f $OBSERVER_PATH $OBSERVER_BIN || exit 1
+  fi
   obs_version=$($OBSERVER_BIN -V 2>&1 | grep -E "observer \(OceanBase([ \_]CE)? ([.0-9]+)\)" | grep -Eo '([.0-9]+)')
   if [[ "$obs_version" == "" ]]
   then
@@ -78,6 +104,7 @@ function mirror_create {
     export IS_CE="0"
     [[ $($OBSERVER_BIN -V 2>&1 | grep -E 'OceanBase[_ ]CE') ]] && COMPONENT="oceanbase-ce" && export IS_CE="1"
   fi
+  $OBSERVER_BIN -V
   [[ -f "$BASE_DIR/tools/deploy/obd/.observer_obd_plugin_version" ]] && obs_version=$(cat $BASE_DIR/tools/deploy/obd/.observer_obd_plugin_version)
   obs_mirror_info=$(obd_exec mirror create -n $COMPONENT -p "$DEPLOY_PATH" -V "$obs_version"  -t $tag -f) && success=1
   if [[ "$success" != "1" ]]
@@ -284,7 +311,7 @@ function deploy_cluster {
   then
     config_yaml=$YAML_CONF
   else
-    if [[ -f $OBD_CLUSTER_PATH/$deploy_name/tmp_config.yaml && "$(grep config_status .data | awk '{print $2}')" == "UNCHNAGE" ]]
+    if [[ -f $OBD_CLUSTER_PATH/$deploy_name/tmp_config.yaml && "$(grep config_status $OBD_CLUSTER_PATH/$deploy_name/.data | awk '{print $2}')" != "UNCHNAGE" ]]
     then
       config_yaml=$OBD_CLUSTER_PATH/$deploy_name/tmp_config.yaml
     else
@@ -373,7 +400,20 @@ function upgreade_cluster {
 
 function destroy_cluster {
   get_deploy_name
-  obd cluster destroy "$deploy_name"  -f
+  if [[ ! -e  "$OBD_CLUSTER_PATH/$deploy_name" ]]
+  then
+    exit 1
+  fi
+  if [[ "$(grep 'status: STATUS_DESTROYED' $OBD_CLUSTER_PATH/$deploy_name/.data)" == "" ]]
+  then
+    obd cluster destroy "$deploy_name"  -f
+  fi
+  if [[ "$RM_CLUSTER" == "1" ]]
+  then
+    rm -rf $OBD_CLUSTER_PATH/$deploy_name
+  else
+    echo "Use --rm to remove deploy $deploy_name dir"
+  fi
 }
 
 function reinstall_cluster {
@@ -557,7 +597,16 @@ function main() {
     case "$1" in
       -v ) VERBOSE_FLAG='-v'; set -x; shift ;;
       --with-local-obproxy) WITH_LOCAL_PROXY="1";SKIP_COPY="1"; shift ;;
-      -c | --config ) YAML_CONF="$2"; shift 2 ;;
+      -c | --config )
+        if [[ $commond == "deploy" || $commond == "redeploy" || $commond == "mysqltest" ]]
+        then
+          YAML_CONF="$2"
+          shift 2
+        else
+          extra_args="$extra_args $1"
+          shift
+        fi
+        ;;
       -n | --deploy-name ) DEPLOY_NAME="$2"; shift 2 ;;
       -p | --data-path ) DATA_PATH="$2"; shift 2 ;;
       -N ) NO_CONFIRM="1"; shift ;;
@@ -569,16 +618,24 @@ function main() {
       --skip-copy ) SKIP_COPY="1"; shift ;;
       --mini) MINI="1"; shift ;;
       --port ) export port_gen="$2"; extra_args="$extra_args $1"; shift ;;
+      --observer ) OBSERVER_PATH="$2"; shift 2 ;;
+      --rm ) RM_CLUSTER="1"; shift ;;
       -- ) shift ;;
       "" ) break ;;
       * ) extra_args="$extra_args $1"; [[ "$1" == "--help" || "$1" == "-h" ]] && HELP="1" ; shift ;;
     esac
   done
+
+  YAML_CONF=$(absolute_path ${YAML_CONF})
+  DATA_PATH=$(absolute_path ${DATA_PATH})
+  OBSERVER_PATH=$(absolute_path ${OBSERVER_PATH})
+
   if [[ "$MINI" == "1" && "$DISABLE_REBOOT" != "1" ]]
   then 
     NEED_REBOOT="1"
   fi
-  if [[ ! -f $DEPLOY_PATH/.obd/.obd_environ || "$(grep '"OBD_DEV_MODE": "1"' $DEPLOY_PATH/.obd/.obd_environ)" == "" ]]
+  export OBD_FORCE_UPDATE_PLUGINS=1
+  if [[ ! -f $OBD_HOME/.obd/.obd_environ || "$(grep '"OBD_DEV_MODE": "1"' $OBD_HOME/.obd/.obd_environ)" == "" ]]
   then
   obd devmode enable || (echo "Exec obd cmd failed. If your branch is based on 3.1_opensource_release, please go to the deps/3rd directory and execute 'bash dep_create.sh all' to install obd." && exit 1)
   obd env set OBD_LOCK_MODE 1

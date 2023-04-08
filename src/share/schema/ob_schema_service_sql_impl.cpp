@@ -205,7 +205,7 @@ int ObSchemaServiceSQLImpl::retrieve_schema_version(T &result, int64_t &schema_v
   } else {
     EXTRACT_INT_FIELD_MYSQL_SKIP_RET(result, "version", schema_version, uint64_t);
     // for debug purpose:
-    // https://aone.alibaba-inc.com/issue/11260176?from=ak&
+    //
     int32_t myport = 0;
     char svr_ip[OB_IP_STR_BUFF] = "";
     int64_t tmp_real_str_len = 0;
@@ -1666,7 +1666,7 @@ int ObSchemaServiceSQLImpl::fetch_all_part_info(
     const uint64_t tenant_id,
     ObISQLClient &sql_client,
     ObArray<T *> &range_part_tables,
-    const uint64_t *table_ids /* = NULL */,
+    const TableTrunc *table_ids /* = NULL */,
     const int64_t table_ids_size /*= 0 */)
 {
   int ret = OB_SUCCESS;
@@ -1698,10 +1698,8 @@ int ObSchemaServiceSQLImpl::fetch_all_part_info(
           LOG_WARN("append sql failed", K(ret));
         } else {
           if (NULL != table_ids && table_ids_size > 0) {
-            if (OB_FAIL(sql.append_fmt(" AND table_id IN "))) {
-              LOG_WARN("append sql failed", K(ret));
-            } else if (OB_FAIL(sql_append_pure_ids(schema_status, table_ids, table_ids_size, sql))) {
-              LOG_WARN("sql append table ids failed", K(ret));
+            if (OB_FAIL(sql_append_ids_and_truncate_version(schema_status, table_ids, table_ids_size, schema_version, sql))) {
+              LOG_WARN("sql append table is failed", K(ret));
             }
           }
         }
@@ -1818,7 +1816,7 @@ int ObSchemaServiceSQLImpl::fetch_all_subpart_info(
     const uint64_t tenant_id,
     ObISQLClient &sql_client,
     ObArray<T *> &range_subpart_tables,
-    const uint64_t *table_ids /* = NULL */,
+    const TableTrunc *table_ids /* = NULL */,
     const int64_t table_ids_size /*= 0 */)
 {
   int ret = OB_SUCCESS;
@@ -1850,10 +1848,8 @@ int ObSchemaServiceSQLImpl::fetch_all_subpart_info(
           LOG_WARN("append sql failed", K(ret));
         } else {
           if (NULL != table_ids && table_ids_size > 0) {
-            if (OB_FAIL(sql.append_fmt(" AND table_id IN "))) {
-              LOG_WARN("append sql failed", K(ret));
-            } else if (OB_FAIL(sql_append_pure_ids(schema_status, table_ids, table_ids_size, sql))) {
-              LOG_WARN("sql append table ids failed");
+            if (OB_FAIL(sql_append_ids_and_truncate_version(schema_status, table_ids, table_ids_size, schema_version, sql))) {
+              LOG_WARN("sql append table is failed", K(ret));
             }
           }
         }
@@ -1889,9 +1885,9 @@ int ObSchemaServiceSQLImpl::gen_batch_fetch_array(
     common::ObArray<T *> &table_schema_array,
     const uint64_t *table_ids /* = NULL */,
     const int64_t table_ids_size /*= 0 */,
-    common::ObIArray<uint64_t> &part_tables,
+    common::ObIArray<TableTrunc> &part_tables,
+    common::ObIArray<TableTrunc> &subpart_tables,
     common::ObIArray<uint64_t> &def_subpart_tables,
-    common::ObIArray<uint64_t> &subpart_tables,
     common::ObIArray<int64_t> &part_idxs,
     common::ObIArray<int64_t> &def_subpart_idxs,
     common::ObIArray<int64_t> &subpart_idxs)
@@ -1919,7 +1915,7 @@ int ObSchemaServiceSQLImpl::gen_batch_fetch_array(
         continue;
       } else if (table_schema->is_user_partition_table()) {
         if (PARTITION_LEVEL_ONE <= table_schema->get_part_level()) {
-          if (OB_FAIL(part_tables.push_back(table_id))) {
+          if (OB_FAIL(part_tables.push_back(TableTrunc(table_id, table_schema->get_truncate_version())))) {
               LOG_WARN("Failed to push back table id", K(ret));
           } else {
             batch_part_num += table_schema->get_part_option().get_part_num();
@@ -1962,7 +1958,7 @@ int ObSchemaServiceSQLImpl::gen_batch_fetch_array(
         }
         if (OB_SUCC(ret)
             && PARTITION_LEVEL_TWO == table_schema->get_part_level()) {
-          if (OB_FAIL(subpart_tables.push_back(table_id))) {
+          if (OB_FAIL(subpart_tables.push_back(TableTrunc(table_id, table_schema->get_truncate_version())))) {
               LOG_WARN("Failed to push back table id", K(ret));
           } else {
             //FIXME:(yanmu.ztl) use precise total partition num instead
@@ -2032,14 +2028,14 @@ int ObSchemaServiceSQLImpl::fetch_all_partition_info(
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid tenant_id", K(ret), K(tenant_id));
   } else {
-    ObSEArray<uint64_t, 10> part_tables;
+    ObSEArray<TableTrunc, 10> part_tables;
+    ObSEArray<TableTrunc, 10> subpart_tables;
     ObSEArray<uint64_t, 10> def_subpart_tables;
-    ObSEArray<uint64_t, 10> subpart_tables;
     ObSEArray<int64_t, 10> part_idxs;
     ObSEArray<int64_t, 10> def_subpart_idxs;
     ObSEArray<int64_t, 10> subpart_idxs;
     if (OB_FAIL(gen_batch_fetch_array(table_schema_array, table_ids, table_ids_size,
-                                      part_tables, def_subpart_tables, subpart_tables,
+                                      part_tables, subpart_tables, def_subpart_tables,
                                       part_idxs, def_subpart_idxs, subpart_idxs))) {
       LOG_WARN("fail to gen batch fetch array", K(ret),
                K(schema_status), K(tenant_id), K(schema_version));
@@ -2056,7 +2052,7 @@ int ObSchemaServiceSQLImpl::fetch_all_partition_info(
         int64_t start_idx = 0 == i ? 0 : part_idxs.at(i - 1) + 1;
         int64_t part_cnt = part_idxs.at(i) - start_idx + 1;
         LOG_TRACE("batch parts:", K(start_idx), K(part_cnt),
-                  "part_tables", ObArrayWrap<uint64_t>(&part_tables.at(start_idx), part_cnt));
+                  "part_tables", ObArrayWrap<TableTrunc>(&part_tables.at(start_idx), part_cnt));
         if (OB_FAIL(fetch_all_part_info(schema_status, schema_version, tenant_id,
                                         sql_client, table_schema_array,
                                         &part_tables.at(start_idx),
@@ -2088,7 +2084,7 @@ int ObSchemaServiceSQLImpl::fetch_all_partition_info(
         int64_t start_idx = 0 == i ? 0 : subpart_idxs.at(i - 1) + 1;
         int64_t part_cnt = subpart_idxs.at(i) - start_idx + 1;
         LOG_TRACE("batch subparts:", K(start_idx), K(part_cnt),
-                  "subpart_tables", ObArrayWrap<uint64_t>(&subpart_tables.at(start_idx), part_cnt));
+                  "subpart_tables", ObArrayWrap<TableTrunc>(&subpart_tables.at(start_idx), part_cnt));
         if (OB_FAIL(fetch_all_subpart_info(schema_status, schema_version, tenant_id,
                                            sql_client, table_schema_array,
                                            &subpart_tables.at(start_idx),
@@ -2962,6 +2958,39 @@ GET_BATCH_SCHEMAS_FUNC_DEFINE(rls_context, ObRlsContextSchema);
 
 int ObSchemaServiceSQLImpl::sql_append_pure_ids(
     const ObRefreshSchemaStatus &schema_status,
+    const TableTrunc *ids,
+    const int64_t ids_size,
+    common::ObSqlString &sql)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(ids) || ids_size <= 0) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", K(ids), K(ids_size));
+  }
+
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(sql.append("("))) {
+      LOG_WARN("append sql failed", K(ret));
+    } else {
+      for (int64_t i = 0; OB_SUCC(ret) && i < ids_size; ++i) {
+        if (OB_FAIL(sql.append_fmt("%s%lu", 0 == i ? "" : ", ",
+                                   fill_extract_schema_id(schema_status, ids[i].table_id_)))) {
+          LOG_WARN("append sql failed", K(ret), K(i));
+        }
+      }
+      if (OB_SUCC(ret)) {
+        if (OB_FAIL(sql.append(")"))) {
+          LOG_WARN("append sql failed", K(ret));
+        }
+      }
+    }
+  }
+
+  return ret;
+}
+
+int ObSchemaServiceSQLImpl::sql_append_pure_ids(
+    const ObRefreshSchemaStatus &schema_status,
     const uint64_t *ids,
     const int64_t ids_size,
     common::ObSqlString &sql)
@@ -2985,6 +3014,44 @@ int ObSchemaServiceSQLImpl::sql_append_pure_ids(
       if (OB_SUCC(ret)) {
         if (OB_FAIL(sql.append(")"))) {
           LOG_WARN("append sql failed", K(ret));
+        }
+      }
+    }
+  }
+
+  return ret;
+}
+
+int ObSchemaServiceSQLImpl::sql_append_ids_and_truncate_version(
+    const ObRefreshSchemaStatus &schema_status,
+    const TableTrunc *ids,
+    const int64_t ids_size,
+    const int64_t schema_version,
+    common::ObSqlString &sql)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(ids) || ids_size <= 0) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", KR(ret), K(ids), K(ids_size));
+  }
+
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(sql.append(" AND ("))) {
+      LOG_WARN("append sql failed", KR(ret));
+    } else {
+      for (int64_t i = 0; OB_SUCC(ret) && i < ids_size; ++i) {
+        if (ids[i].truncate_version_ > schema_version) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("truncate version can not bigger than schema version", KR(ret), K(table_id), K(ids[i].truncate_version_), K(schema_version));
+        } else if (OB_FAIL(sql.append_fmt("%s(table_id = %lu AND schema_version >= %ld)", 0 == i ? "" : "OR ",
+                                   fill_extract_schema_id(schema_status, ids[i].table_id_),
+                                   ids[i].truncate_version_))) {
+          LOG_WARN("append sql failed", KR(ret), K(i));
+        }
+      }
+      if (OB_SUCC(ret)) {
+        if (OB_FAIL(sql.append(")"))) {
+          LOG_WARN("append sql failed", KR(ret));
         }
       }
     }
@@ -5569,6 +5636,10 @@ int ObSchemaServiceSQLImpl::fetch_part_info(
   if (OB_ISNULL(schema)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("schema should not be NULL", K(ret));
+  } else if (schema->get_truncate_version() > schema_version) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("truncate version can not bigger than schema version", KR(ret), K(fill_extract_tenant_id(schema_status, tenant_id)),
+                                                                    K(schema->get_truncate_version()), K(schema_version));
   } else if (PARTITION_LEVEL_ZERO == schema->get_part_level()) {
     // skip
   } else {
@@ -5577,8 +5648,9 @@ int ObSchemaServiceSQLImpl::fetch_part_info(
       if (OB_FAIL(sql.append_fmt(FETCH_ALL_PART_HISTORY_SQL, OB_ALL_PART_HISTORY_TNAME,
                                  fill_extract_tenant_id(schema_status, tenant_id)))) {
         LOG_WARN("append sql failed", K(ret));
-      } else if (OB_FAIL(sql.append_fmt(" AND table_id = %lu AND schema_version <= %ld",
+      } else if (OB_FAIL(sql.append_fmt(" AND table_id = %lu AND schema_version >= %ld AND schema_version <= %ld",
                                         fill_extract_schema_id(schema_status, schema_id),
+                                        schema->get_truncate_version(),
                                         schema_version))) {
         LOG_WARN("append sql failed", K(ret));
       } else if (OB_FAIL(sql.append_fmt(" ORDER BY tenant_id, table_id, part_id, schema_version"))) {
@@ -5618,6 +5690,10 @@ int ObSchemaServiceSQLImpl::fetch_sub_part_info(
   if (OB_ISNULL(schema)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("schema should not be NULL", K(ret));
+  } else if (schema->get_truncate_version() > schema_version) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("truncate version can not bigger than schema version", KR(ret), K(fill_extract_tenant_id(schema_status, tenant_id)),
+                                                                    K(schema->get_truncate_version()), K(schema_version));
   } else if (PARTITION_LEVEL_TWO != schema->get_part_level()) {
     // skip
   } else if (schema->has_sub_part_template_def()) {
@@ -5653,9 +5729,10 @@ int ObSchemaServiceSQLImpl::fetch_sub_part_info(
       if (OB_FAIL(sql.append_fmt(FETCH_ALL_SUB_PART_HISTORY_SQL, OB_ALL_SUB_PART_HISTORY_TNAME,
                                  fill_extract_tenant_id(schema_status, tenant_id)))) {
         LOG_WARN("append sql failed", K(ret));
-      } else if (OB_FAIL(sql.append_fmt(" AND table_id = %lu and schema_version <= %ld "
+      } else if (OB_FAIL(sql.append_fmt(" AND table_id = %lu AND schema_version >= %ld AND schema_version <= %ld "
                  " ORDER BY tenant_id, table_id, part_id, sub_part_id, schema_version",
                  fill_extract_schema_id(schema_status, schema_id),
+                 schema->get_truncate_version(),
                  schema_version))) {
         LOG_WARN("append sql failed", K(ret));
       } else {
@@ -8273,91 +8350,6 @@ int ObSchemaServiceSQLImpl::get_link_table_schema(const ObDbLinkSchema *dblink_s
   return ret;
 }
 
-int ObSchemaServiceSQLImpl::fetch_desc_table(uint64_t dblink_id,
-                     common::sqlclient::DblinkDriverProto &link_type,
-                     const ObString &database_name,
-                     const ObString &table_name,
-                     const common::sqlclient::dblink_param_ctx &param_ctx,
-                     sql::ObSQLSessionInfo *session_info,
-                     ObIAllocator &alloctor,
-                     int64_t row_idx,
-                     int32_t &length)
-{
-  int ret = OB_SUCCESS;
-  const char * sql_str_fmt = "/*$BEFPARSEdblink_req_level=1*/ desc \"%.*s\".\"%.*s\"";
-  ObSqlString sql;
-  ObMySQLResult *result = NULL;
-  SMART_VAR(ObMySQLProxy::MySQLResult, res) {
-    common::sqlclient::ObISQLConnection *dblink_conn = NULL;
-    if (OB_FAIL(sql.append_fmt(sql_str_fmt, database_name.length(), database_name.ptr(),
-                                      table_name.length(), table_name.ptr()))) {
-      LOG_WARN("append sql failed", K(ret));
-    } else if (OB_FAIL(dblink_proxy_->acquire_dblink(dblink_id, link_type, param_ctx, dblink_conn, session_info->get_sessid(), 1))) {
-      ObDblinkUtils::process_dblink_errno(link_type, ret);
-      LOG_WARN("failed to acquire dblink", K(ret), K(dblink_id));
-    } else if (OB_FAIL(session_info->get_dblink_context().register_dblink_conn_pool(dblink_conn->get_common_server_pool()))) {
-      LOG_WARN("failed to register dblink conn pool to current session", K(ret));
-    } else if (OB_FAIL(dblink_proxy_->dblink_read(dblink_conn, res, sql.ptr()))) {
-      ObDblinkUtils::process_dblink_errno(link_type, dblink_conn, ret);
-      LOG_WARN("read link failed", K(ret), K(dblink_id), K(sql.ptr()));
-    } else if (OB_ISNULL(result = res.get_result())) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("fail to get result", K(ret));
-    } else if (OB_FAIL(result->set_expected_charset_id(static_cast<uint16_t>(common::ObNlsCharsetId::CHARSET_AL32UTF8_ID),
-                                                       static_cast<uint16_t>(common::ObNlsCharsetId::CHARSET_AL32UTF8_ID)))) {
-      // dblink will convert the result to AL32UTF8 when pulling schema meta
-      LOG_WARN("failed to set expected charset id", K(ret));
-    } else if (row_idx < 0) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("invalid row_idx", K(ret), K(row_idx));
-    } else {
-      while(row_idx >= 0 && OB_SUCC(ret)) {
-        if (OB_FAIL(result->next())) {
-          LOG_WARN("failed to get next row", K(ret));
-        }
-        --row_idx;
-      }
-      if (-1 == row_idx && OB_SUCC(ret)) {
-        const ObTimeZoneInfo *tz_info = TZ_INFO(session_info);
-        ObObj value;
-        ObString string_value;
-        if (OB_ISNULL(tz_info)) {
-          ret = OB_ERR_UNEXPECTED;
-          LOG_WARN("tz info is NULL", K(ret));
-        } else if (OB_FAIL(result->get_obj(1, value, tz_info, &alloctor))) {
-          LOG_WARN("failed to get obj", K(ret));
-        } else if (ObVarcharType != value.get_type()) {
-          ret = OB_ERR_UNEXPECTED;
-          LOG_WARN("type is invalid", K(value.get_type()), K(ret));
-        } else if (OB_FAIL(value.get_varchar(string_value))) {
-          LOG_WARN("failed to get varchar value", K(ret));
-        } else if (OB_FAIL(ObDblinkService::get_length_from_type_text(string_value, length))) {
-          LOG_WARN("failed to get length", K(ret));
-        } else {
-          LOG_DEBUG("desc table type string", K(string_value), K(length));
-        }
-      } else {
-        // do nothing
-      }
-    }
-    if (NULL != dblink_conn) {
-      int tmp_ret = OB_SUCCESS;
-      if (DBLINK_DRV_OB == link_type &&
-          NULL != result &&
-          OB_SUCCESS != (tmp_ret = result->close())) {
-        LOG_WARN("failed to close result", K(tmp_ret));
-      }
-      if (OB_SUCCESS != (tmp_ret = dblink_proxy_->release_dblink(link_type, dblink_conn, session_info->get_sessid()))) {
-        LOG_WARN("failed to relese connection", K(tmp_ret));
-      }
-      if (OB_SUCC(ret)) {
-        ret = tmp_ret;
-      }
-    }
-  }
-  return ret;
-}
-
 template<typename T>
 int ObSchemaServiceSQLImpl::fetch_link_table_info(uint64_t tenant_id,
                                                   uint64_t dblink_id,
@@ -8425,72 +8417,110 @@ int ObSchemaServiceSQLImpl::fetch_link_table_info(uint64_t tenant_id,
       // dblink will convert the result to AL32UTF8 when pulling schema meta
       LOG_WARN("failed to set expected charset id", K(ret));
     } else {
-      T tmp_table_schema;
-      table_schema = NULL;
-      ObObjMeta type;
-      int64_t column_count = result->get_column_count();
-      tmp_table_schema.set_tenant_id(tenant_id);
-      tmp_table_schema.set_table_id(1); //no use
-      tmp_table_schema.set_dblink_id(dblink_id);
-      tmp_table_schema.set_collation_type(CS_TYPE_UTF8MB4_BIN);
-      tmp_table_schema.set_charset_type(ObCharset::charset_type_by_coll(tmp_table_schema.get_collation_type()));
-      if (OB_FAIL(tmp_table_schema.set_table_name(table_name))) {
-        LOG_WARN("set table name failed", K(ret), K(table_name));
-      } else if (OB_FAIL(tmp_table_schema.set_link_database_name(database_name))) {
-        LOG_WARN("set database name failed", K(ret), K(database_name));
-      }
-      for (int64_t i = 0; OB_SUCC(ret) && i < column_count; ++i) {
-        ObColumnSchemaV2 column_schema;
-        int16_t precision = 0;
-        int16_t scale = 0;
-        int32_t length = 0;
-        ObString column_name;
-        bool old_max_length = false;
-        if (OB_FAIL(result->get_col_meta(i, old_max_length, column_name, type, precision, scale, length))) {
-          LOG_WARN("failed to get column meta", K(i), K(old_max_length), K(ret));
-        } else if (OB_FAIL(column_schema.set_column_name(column_name))) {
-          LOG_WARN("failed to set column name", K(i), K(column_name), K(ret));
-        } else {
-          column_schema.set_table_id(tmp_table_schema.get_table_id());
-          column_schema.set_tenant_id(tenant_id);
-          column_schema.set_column_id(i + OB_END_RESERVED_COLUMN_ID_NUM);
-          column_schema.set_meta_type(type);
-          column_schema.set_charset_type(ObCharset::charset_type_by_coll(column_schema.get_collation_type()));
-          column_schema.set_data_precision(precision);
-          column_schema.set_data_scale(scale);
-          column_schema.set_data_length(length);
-          if (OB_SUCC(ret) &&
-              next_sql_req_level == 1 &&
-              (ObNCharType == column_schema.get_data_type() || ObNVarchar2Type == column_schema.get_data_type())) {
-            if (DBLINK_DRV_OB == link_type &&
-                sql::DblinkGetConnType::TEMP_CONN != conn_type &&
-                OB_FAIL(fetch_desc_table(dblink_id,
-                                        link_type,
-                                        database_name,
-                                        table_name,
-                                        param_ctx,
-                                        session_info,
-                                        alloctor,
-                                        i,
-                                        length))) {
-              LOG_WARN("failed to fetch desc table", K(ret));
-            } else {
-              column_schema.set_data_length(length);
+      const char * desc_sql_str_fmt = "/*$BEFPARSEdblink_req_level=1*/ desc \"%.*s\".\"%.*s\"";
+      ObSqlString desc_sql;
+      ObMySQLResult *desc_result = NULL;
+      bool need_desc = (next_sql_req_level == 1) && DBLINK_DRV_OB == link_type && sql::DblinkGetConnType::TEMP_CONN != conn_type;
+      int64_t desc_res_row_idx = -1;
+      SMART_VAR(ObMySQLProxy::MySQLResult, desc_res) {
+  T     tmp_table_schema;
+        table_schema = NULL;
+        ObObjMeta type;
+        int64_t column_count = result->get_column_count();
+        tmp_table_schema.set_tenant_id(tenant_id);
+        tmp_table_schema.set_table_id(1); //no use
+        tmp_table_schema.set_dblink_id(dblink_id);
+        tmp_table_schema.set_collation_type(CS_TYPE_UTF8MB4_BIN);
+        tmp_table_schema.set_charset_type(ObCharset::charset_type_by_coll(tmp_table_schema.get_collation_type()));
+        if (OB_FAIL(ret)) {
+          // do nothing
+        } else if (OB_FAIL(tmp_table_schema.set_table_name(table_name))) {
+          LOG_WARN("set table name failed", K(ret), K(table_name));
+        } else if (OB_FAIL(tmp_table_schema.set_link_database_name(database_name))) {
+          LOG_WARN("set database name failed", K(ret), K(database_name));
+        }
+        for (int64_t i = 0; OB_SUCC(ret) && i < column_count; ++i) {
+          ObColumnSchemaV2 column_schema;
+          int16_t precision = 0;
+          int16_t scale = 0;
+          int32_t length = 0;
+          ObString column_name;
+          bool old_max_length = false;
+          if (OB_FAIL(result->get_col_meta(i, old_max_length, column_name, type, precision, scale, length))) {
+            LOG_WARN("failed to get column meta", K(i), K(old_max_length), K(ret));
+          } else if (OB_FAIL(column_schema.set_column_name(column_name))) {
+            LOG_WARN("failed to set column name", K(i), K(column_name), K(ret));
+          } else {
+            column_schema.set_table_id(tmp_table_schema.get_table_id());
+            column_schema.set_tenant_id(tenant_id);
+            column_schema.set_column_id(i + OB_END_RESERVED_COLUMN_ID_NUM);
+            column_schema.set_meta_type(type);
+            column_schema.set_charset_type(ObCharset::charset_type_by_coll(column_schema.get_collation_type()));
+            column_schema.set_data_precision(precision);
+            column_schema.set_data_scale(scale);
+            if (need_desc && OB_ISNULL(desc_result) &&
+                (ObNCharType == column_schema.get_data_type() || ObNVarchar2Type == column_schema.get_data_type())) {
+              if (OB_FAIL(desc_sql.append_fmt(desc_sql_str_fmt, database_name.length(), database_name.ptr(),
+                                          table_name.length(), table_name.ptr()))) {
+                LOG_WARN("append desc sql failed", K(ret));
+              } else if (OB_FAIL(dblink_proxy_->dblink_read(dblink_conn, desc_res, desc_sql.ptr()))) {
+                ObDblinkUtils::process_dblink_errno(link_type, dblink_conn, ret);
+                LOG_WARN("read link failed", K(ret), K(dblink_id), K(desc_sql.ptr()));
+              } else if (OB_ISNULL(desc_result = desc_res.get_result())) {
+                ret = OB_ERR_UNEXPECTED;
+                LOG_WARN("fail to get result", K(ret));
+              } else if (OB_FAIL(desc_result->set_expected_charset_id(static_cast<uint16_t>(common::ObNlsCharsetId::CHARSET_AL32UTF8_ID),
+                                                                      static_cast<uint16_t>(common::ObNlsCharsetId::CHARSET_AL32UTF8_ID)))) {
+                // dblink will convert the result to AL32UTF8 when pulling schema meta
+                LOG_WARN("failed to set expected charset id", K(ret));
+              }
             }
+            if (OB_SUCC(ret) && OB_NOT_NULL(desc_result) && (ObNCharType == column_schema.get_data_type() || ObNVarchar2Type == column_schema.get_data_type())) {
+              while (OB_SUCC(ret) && desc_res_row_idx < i) {
+                if (OB_FAIL(desc_result->next())) {
+                  LOG_WARN("failed to get next row", K(ret));
+                }
+                ++desc_res_row_idx;
+              }
+              if (desc_res_row_idx == i && OB_SUCC(ret)) {
+                const ObTimeZoneInfo *tz_info = TZ_INFO(session_info);
+                ObObj value;
+                ObString string_value;
+                if (OB_ISNULL(tz_info)) {
+                  ret = OB_ERR_UNEXPECTED;
+                  LOG_WARN("tz info is NULL", K(ret));
+                } else if (OB_FAIL(desc_result->get_obj(1, value, tz_info, &alloctor))) {
+                  LOG_WARN("failed to get obj", K(ret));
+                } else if (ObVarcharType != value.get_type()) {
+                  ret = OB_ERR_UNEXPECTED;
+                  LOG_WARN("type is invalid", K(value.get_type()), K(ret));
+                } else if (OB_FAIL(value.get_varchar(string_value))) {
+                  LOG_WARN("failed to get varchar value", K(ret));
+                } else if (OB_FAIL(ObDblinkService::get_length_from_type_text(string_value, length))) {
+                  LOG_WARN("failed to get length", K(ret));
+                } else {
+                  LOG_DEBUG("desc table type string", K(string_value), K(length));
+                }
+              }
+            }
+            column_schema.set_data_length(length);
+          }
+          LOG_DEBUG("dblink column schema", K(i), K(column_schema.get_data_precision()),
+                                              K(column_schema.get_data_scale()),
+                                              K(column_schema.get_data_length()),
+                                              K(column_schema.get_data_type()));
+          if (OB_SUCC(ret) && OB_FAIL(tmp_table_schema.add_column(column_schema))) {
+            LOG_WARN("fail to add link column schema. ", K(i), K(column_schema), K(ret));
           }
         }
-        LOG_DEBUG("dblink column schema", K(i), K(column_schema.get_data_precision()),
-                                            K(column_schema.get_data_scale()), 
-                                            K(column_schema.get_data_length()), 
-                                            K(column_schema.get_data_type()));
-        if (OB_FAIL(ret)) {
-        } else if (OB_FAIL(tmp_table_schema.add_column(column_schema))) {
-          LOG_WARN("fail to add link column schema. ", K(i), K(column_schema), K(ret));
-        }
-      }
-      if (OB_SUCC(ret)) {
-        if (OB_FAIL(ObSchemaUtils::alloc_schema(alloctor, tmp_table_schema, table_schema))) {
+        if (OB_SUCC(ret) && OB_FAIL(ObSchemaUtils::alloc_schema(alloctor, tmp_table_schema, table_schema))) {
           LOG_WARN("failed to alloc table_schema", K(ret));
+        }
+        int tmp_ret = OB_SUCCESS;
+        if (OB_NOT_NULL(desc_result) && OB_SUCCESS != (tmp_ret = desc_result->close())) {
+          LOG_WARN("failed to close desc result", K(tmp_ret));
+        } else {
+          desc_result = NULL;
         }
       }
     }
@@ -8506,7 +8536,7 @@ int ObSchemaServiceSQLImpl::fetch_link_table_info(uint64_t tenant_id,
     }
     if (NULL != dblink_conn) {
       int tmp_ret = OB_SUCCESS;
-      if (DBLINK_DRV_OB == link_type && 
+      if (DBLINK_DRV_OB == link_type &&
           NULL != result &&
           OB_SUCCESS != (tmp_ret = result->close())) {
         LOG_WARN("failed to close result", K(tmp_ret));

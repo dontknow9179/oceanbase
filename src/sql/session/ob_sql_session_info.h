@@ -963,8 +963,6 @@ public:
     cached_tenant_config_info_.refresh();
     return cached_tenant_config_info_.get_enable_sql_extension();
   }
-  bool is_registered_to_deadlock() const { return ATOMIC_LOAD(&is_registered_to_deadlock_); }
-  void set_registered_to_deadlock(bool state) { ATOMIC_SET(&is_registered_to_deadlock_, state); }
   bool is_ps_prepare_stage() const { return is_ps_prepare_stage_; }
   void set_is_ps_prepare_stage(bool v) { is_ps_prepare_stage_ = v; }
   int get_tenant_audit_trail_type(ObAuditTrailType &at_type)
@@ -997,8 +995,12 @@ public:
   void set_load_data_exec_session(bool v) { is_load_data_exec_session_ = v; }
   bool is_load_data_exec_session() const { return is_load_data_exec_session_; }
   inline ObSqlString &get_pl_exact_err_msg() { return pl_exact_err_msg_; }
-  void set_got_conn_res(bool v) { got_conn_res_ = v; }
-  bool has_got_conn_res() const { return got_conn_res_; }
+  void set_got_tenant_conn_res(bool v) { got_tenant_conn_res_ = v; }
+  bool has_got_tenant_conn_res() const { return got_tenant_conn_res_; }
+  void set_got_user_conn_res(bool v) { got_user_conn_res_ = v; }
+  bool has_got_user_conn_res() const { return got_user_conn_res_; }
+  void set_conn_res_user_id(uint64_t v) { conn_res_user_id_ = v; }
+  uint64_t get_conn_res_user_id() const { return conn_res_user_id_; }
   int on_user_connect(share::schema::ObSessionPrivInfo &priv_info, const ObUserInfo *user_info);
   int on_user_disconnect();
   virtual void reset_tx_variable();
@@ -1139,15 +1141,15 @@ private:
   bool is_table_name_hidden_;
   void *piece_cache_;
   bool is_load_data_exec_session_;
-  // 记录session是否注册过死锁检测的信息
-  bool is_registered_to_deadlock_;
   ObSqlString pl_exact_err_msg_;
   bool is_ps_prepare_stage_;
   // Record whether this session has got connection resource, which means it increased connections count.
   // It's used for on_user_disconnect.
   // No matter whether apply for resource successfully, a session will call on_user_disconnect when disconnect.
   // While only session got connection resource can release connection resource and decrease connections count.
-  bool got_conn_res_;
+  bool got_tenant_conn_res_;
+  bool got_user_conn_res_;
+  uint64_t conn_res_user_id_;
   bool tx_level_temp_table_;
   // get_session_allocator can only apply for fixed-length memory.
   // To customize the memory length, you need to use malloc_alloctor of mem_context
@@ -1186,11 +1188,13 @@ private:
   ObTxnExtraInfoEncoder txn_extra_info_encoder_;
 public:
   void post_sync_session_info();
+  void prep_txn_free_route_baseline(bool reset_audit = true);
   void set_txn_free_route(bool txn_free_route);
   int calc_txn_free_route();
   bool can_txn_free_route() const;
   virtual bool is_txn_free_route_temp() const { return tx_desc_ != NULL && txn_free_route_ctx_.is_temp(*tx_desc_); }
   transaction::ObTxnFreeRouteCtx &get_txn_free_route_ctx() { return txn_free_route_ctx_; }
+  uint64_t get_txn_free_route_flag() const { return txn_free_route_ctx_.get_audit_record(); }
   void check_txn_free_route_alive();
 private:
   transaction::ObTxnFreeRouteCtx txn_free_route_ctx_;
@@ -1200,7 +1204,7 @@ private:
   ObExecContext *cur_exec_ctx_;
   bool restore_auto_commit_; // for dblink xa transaction to restore the value of auto_commit
   oceanbase::sql::ObDblinkCtxInSession dblink_context_;
-  int64_t sql_req_level_; // for sql request between cluster avoid dead lock, such as dblink dead lock https://yuque.antfin.com/ob/sql/gum62i
+  int64_t sql_req_level_; // for sql request between cluster avoid dead lock, such as dblink dead lock
   int64_t expect_group_id_;
   // When try packet retry failed, set this flag true and retry at current thread.
   // This situation is unexpected and will report a warning to user.

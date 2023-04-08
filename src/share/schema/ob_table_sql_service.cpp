@@ -301,12 +301,6 @@ int ObTableSqlService::drop_inc_partition(common::ObISQLClient &sql_client,
                 "column count", ori_table.get_column_count(), K(ret));
       } else if (OB_FAIL(delete_from_all_histogram_stat(sql_client, tenant_id, table_id, extra_str))) {
         LOG_WARN("failed to delete all histogram_stat", K(table_id), K(ret));
-      } else if (OB_FAIL(delete_from_all_table_stat_history(sql_client, tenant_id, table_id, extra_str))) {
-        LOG_WARN("delete from all table stat history failed", K(ret));
-      } else if (OB_FAIL(delete_from_all_column_stat_history(sql_client, tenant_id, table_id, extra_str))) {
-        LOG_WARN("failed to delete all column stat history", K(ret));
-      } else if (OB_FAIL(delete_from_all_histogram_stat_history(sql_client, tenant_id, table_id, extra_str))) {
-        LOG_WARN("failed to delete all histogram_stat history", K(ret));
       } else if (OB_FAIL(delete_from_all_monitor_modified(sql_client, tenant_id, table_id, extra_str2))) {
         LOG_WARN("failed to delete from all monitor modified", K(ret));
       }
@@ -405,12 +399,6 @@ int ObTableSqlService::drop_inc_sub_partition(common::ObISQLClient &sql_client,
                 "column count", ori_table.get_column_count(), K(ret));
       } else if (OB_FAIL(delete_from_all_histogram_stat(sql_client, tenant_id, table_id, &condition_str))) {
         LOG_WARN("failed to delete all histogram_stat", K(table_id), K(ret));
-      } else if (OB_FAIL(delete_from_all_table_stat_history(sql_client, tenant_id, table_id, &condition_str))) {
-        LOG_WARN("delete from all table stat history failed", K(ret));
-      } else if (OB_FAIL(delete_from_all_column_stat_history(sql_client, tenant_id, table_id, &condition_str))) {
-        LOG_WARN("failed to delete all column stat history", K(ret));
-      } else if (OB_FAIL(delete_from_all_histogram_stat_history(sql_client, tenant_id, table_id, &condition_str))) {
-        LOG_WARN("failed to delete all histogram_stat history", K(ret));
       } else if (OB_FAIL(delete_from_all_monitor_modified(sql_client, tenant_id, table_id, &dml_info_cond_str))) {
         LOG_WARN("failed to delete from all monitor modified", K(ret));
       }
@@ -734,12 +722,6 @@ int ObTableSqlService::drop_table(const ObTableSchema &table_schema,
       LOG_WARN("failed to delete from all column usage", K(ret));
     } else if (OB_FAIL(delete_from_all_monitor_modified(sql_client, tenant_id, table_id))) {
       LOG_WARN("failed to delete from all monitor modified", K(ret));
-    } else if (OB_FAIL(delete_from_all_table_stat_history(sql_client, tenant_id, table_id))) {
-      LOG_WARN("delete from all table stat history failed", K(ret));
-    } else if (OB_FAIL(delete_from_all_column_stat_history(sql_client, tenant_id, table_id))) {
-      LOG_WARN("failed to delete all column stat history", K(ret));
-    } else if (OB_FAIL(delete_from_all_histogram_stat_history(sql_client, tenant_id, table_id))) {
-      LOG_WARN("failed to delete all histogram_stat history", K(ret));
     } else if (OB_FAIL(delete_from_all_optstat_user_prefs(sql_client, tenant_id, table_id))) {
       LOG_WARN("failed to delete all optstat user prefs", K(ret));
     }
@@ -1973,12 +1955,6 @@ int ObTableSqlService::update_table_options(ObISQLClient &sql_client,
       LOG_WARN("failed to delete from all column usage", K(ret));
     } else if (OB_FAIL(delete_from_all_monitor_modified(sql_client, tenant_id, table_id))) {
       LOG_WARN("failed to delete from all monitor modified", K(ret));
-    } else if (OB_FAIL(delete_from_all_table_stat_history(sql_client, tenant_id, table_id))) {
-      LOG_WARN("delete from all table stat history failed", K(ret));
-    } else if (OB_FAIL(delete_from_all_column_stat_history(sql_client, tenant_id, table_id))) {
-      LOG_WARN("failed to delete all column stat history", K(ret));
-    } else if (OB_FAIL(delete_from_all_histogram_stat_history(sql_client, tenant_id, table_id))) {
-      LOG_WARN("failed to delete all histogram stat history", K(ret));
     } else if (OB_FAIL(delete_from_all_optstat_user_prefs(sql_client, tenant_id, table_id))) {
       LOG_WARN("failed to delete all optstat user prefs", K(ret));
     }
@@ -2542,6 +2518,10 @@ int ObTableSqlService::gen_table_dml(
                             || table.view_column_filled())) {
     ret = OB_NOT_SUPPORTED;
     LOG_WARN("option is not support before 4.1", K(ret), K(table));
+  } else if (data_version < DATA_VERSION_4_1_0_0
+             && OB_UNLIKELY((OB_INVALID_VERSION != table.get_truncate_version()))) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_WARN("truncate version is not support before 4.1", K(ret), K(table));
   } else {
     const ObPartitionOption &part_option = table.get_part_option();
     const ObPartitionOption &sub_part_option = table.get_sub_part_option();
@@ -2649,6 +2629,8 @@ int ObTableSqlService::gen_table_dml(
             && OB_FAIL(dml.add_column("object_status", static_cast<int64_t> (table.get_object_status()))))
         || (data_version >= DATA_VERSION_4_1_0_0
             && OB_FAIL(dml.add_column("table_flags", table.get_table_flags())))
+        || (data_version >= DATA_VERSION_4_1_0_0
+            && OB_FAIL(dml.add_column("truncate_version", table.get_truncate_version())))
         ) {
       LOG_WARN("add column failed", K(ret));
     }
@@ -2783,6 +2765,10 @@ int ObTableSqlService::update_table_attribute(ObISQLClient &sql_client,
                             || new_table_schema.view_column_filled())) {
     ret = OB_NOT_SUPPORTED;
     LOG_WARN("option is not support before 4.1", K(ret), K(new_table_schema));
+  } else if (data_version < DATA_VERSION_4_1_0_0
+             && OB_UNLIKELY((OB_INVALID_VERSION != new_table_schema.get_truncate_version()))) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_WARN("truncate version is not support before 4.1", K(ret), K(new_table_schema));
   } else if (OB_FAIL(dml.add_pk_column("tenant_id", ObSchemaUtils::get_extract_tenant_id(
                                              exec_tenant_id, tenant_id)))
       || OB_FAIL(dml.add_pk_column("table_id", ObSchemaUtils::get_extract_schema_id(
@@ -2812,6 +2798,8 @@ int ObTableSqlService::update_table_attribute(ObISQLClient &sql_client,
       || OB_FAIL(dml.add_column("data_table_id", new_table_schema.get_data_table_id()))
       || ((data_version >= DATA_VERSION_4_1_0_0 || update_object_status_ignore_version)
           && OB_FAIL(dml.add_column("object_status", static_cast<int64_t> (new_table_schema.get_object_status()))))
+      || (data_version >= DATA_VERSION_4_1_0_0
+          && OB_FAIL(dml.add_column("truncate_version", new_table_schema.get_truncate_version())))
       ) {
     LOG_WARN("add column failed", K(ret));
   } else {
@@ -3333,82 +3321,6 @@ int ObTableSqlService::delete_from_all_column_history(ObISQLClient &sql_client,
     } else if (table_schema.get_column_count() != affected_rows) {
       LOG_WARN("affected_rows not same with column_count", K(affected_rows),
           "column_count", table_schema.get_column_count(), K(ret));
-    }
-  }
-  return ret;
-}
-
-int ObTableSqlService::delete_from_all_table_stat_history(ObISQLClient &sql_client,
-                                                          const uint64_t tenant_id,
-                                                          const uint64_t table_id,
-                                                          ObSqlString *extra_condition)
-{
-  int ret = OB_SUCCESS;
-  ObDMLSqlSplicer dml;
-  const uint64_t exec_tenant_id = ObSchemaUtils::get_exec_tenant_id(tenant_id);
-  if (OB_FAIL(dml.add_pk_column("tenant_id", ObSchemaUtils::get_extract_tenant_id(
-                                       exec_tenant_id, tenant_id)))
-      || OB_FAIL(dml.add_pk_column("table_id", ObSchemaUtils::get_extract_schema_id(
-                                          exec_tenant_id, table_id)))) {
-    LOG_WARN("add column failed", K(ret));
-  } else {
-    int64_t affected_rows = 0;
-    if (OB_NOT_NULL(extra_condition) && OB_FAIL(dml.get_extra_condition().assign(*extra_condition))) {
-      LOG_WARN("fail to assign extra condition", K(ret));
-    } else if (OB_FAIL(exec_delete(sql_client, tenant_id, table_id, OB_ALL_TABLE_STAT_HISTORY_TNAME,
-                            dml, affected_rows))) {
-      LOG_WARN("exec delete failed", K(ret));
-    }
-  }
-  return ret;
-}
-
-int ObTableSqlService::delete_from_all_column_stat_history(ObISQLClient &sql_client,
-                                                           const uint64_t tenant_id,
-                                                           const uint64_t table_id,
-                                                           ObSqlString *extra_condition)
-{
-  int ret = OB_SUCCESS;
-  ObDMLSqlSplicer dml;
-  const uint64_t exec_tenant_id = ObSchemaUtils::get_exec_tenant_id(tenant_id);
-  if (OB_FAIL(dml.add_pk_column("tenant_id", ObSchemaUtils::get_extract_tenant_id(
-                                        exec_tenant_id, tenant_id)))
-      || OB_FAIL(dml.add_pk_column("table_id", ObSchemaUtils::get_extract_schema_id(
-                                           exec_tenant_id, table_id)))) {
-    LOG_WARN("add column failed", K(ret));
-  } else {
-    int64_t affected_rows = 0;
-    if (OB_NOT_NULL(extra_condition) && OB_FAIL(dml.get_extra_condition().assign(*extra_condition))) {
-      LOG_WARN("fail to assign extra condition", K(ret));
-    } else if (OB_FAIL(exec_delete(sql_client, tenant_id, table_id, OB_ALL_COLUMN_STAT_HISTORY_TNAME,
-                            dml, affected_rows))) {
-      LOG_WARN("exec delete failed", K(ret));
-    }
-  }
-  return ret;
-}
-
-int ObTableSqlService::delete_from_all_histogram_stat_history(ObISQLClient &sql_client,
-                                                              const uint64_t tenant_id,
-                                                              const uint64_t table_id,
-                                                              ObSqlString *extra_condition)
-{
-  int ret = OB_SUCCESS;
-  ObDMLSqlSplicer dml;
-  const uint64_t exec_tenant_id = ObSchemaUtils::get_exec_tenant_id(tenant_id);
-  if (OB_FAIL(dml.add_pk_column("tenant_id", ObSchemaUtils::get_extract_tenant_id(
-                                        exec_tenant_id, tenant_id)))
-      || OB_FAIL(dml.add_pk_column("table_id", ObSchemaUtils::get_extract_schema_id(
-                                           exec_tenant_id, table_id)))) {
-    LOG_WARN("add column failed", K(ret));
-  } else {
-    int64_t affected_rows = 0;
-    if (OB_NOT_NULL(extra_condition) && OB_FAIL(dml.get_extra_condition().assign(*extra_condition))) {
-      LOG_WARN("fail to assign extra condition", K(ret));
-    } else if (OB_FAIL(exec_delete(sql_client, tenant_id, table_id,
-                            OB_ALL_HISTOGRAM_STAT_HISTORY_TNAME,
-                            dml, affected_rows))) {
-      LOG_WARN("exec delete failed", K(ret));
     }
   }
   return ret;

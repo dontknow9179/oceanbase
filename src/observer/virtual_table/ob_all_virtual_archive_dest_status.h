@@ -52,6 +52,7 @@ private:
     ObFixedLengthString<MAX_SYNC_TYPE_LENTH> synchronized_;
     share::ObBackupDefaultFixedLenString comment_;
     void reset();
+    bool is_valid();
     TO_STRING_KV(K_(tenant_id), K_(dest_id), K_(status), K_(path), K_(checkpoint_scn),
       K_(synchronized),K_(comment));
   };
@@ -70,8 +71,8 @@ private:
   int get_all_tenant_();
   // get all ls list
   int get_all_tenant_ls_(const uint64_t tenant_id);
-  // get ls end scn and store them into ls_end_map_
-  int get_ls_end_scn_(const uint64_t tenant_id); // k means ls_id, v means end_scn
+  // get ls max scn and store them into ls_end_map_
+  int get_ls_max_scn_(const uint64_t tenant_id); // k means ls_id, v means max_scn
   // get ls checkpoint scn and store them into ls_checkpoint_map_
   int get_ls_checkpoint_scn_(const uint64_t tenant_id, const int64_t dest_id);
   int get_full_row_(const share::schema::ObTableSchema *table,
@@ -79,7 +80,8 @@ private:
                     ObIArray<Column> &columns);
   int get_status_info_(const uint64_t tenant_id, const int64_t dest_id, ObArchiveDestStatusInfo &dest_status_info);
   int compare_scn_map_();
-
+  int check_if_switch_piece_(const uint64_t tenant_id, const int64_t dest_id);
+  int get_log_archive_used_piece_id_(const uint64_t tenant_id, const int64_t dest_id, int64_t &piece_id);
 private:
   bool is_inited_;
   bool ls_end_map_inited_;

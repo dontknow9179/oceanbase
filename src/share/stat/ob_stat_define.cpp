@@ -91,10 +91,9 @@ int ObTableStatParam::assign(const ObTableStatParam &other)
   sample_info_.sample_value_ = other.sample_info_.sample_value_;
   method_opt_ = other.method_opt_;
   degree_ = other.degree_;
-  need_global_ = other.need_global_;
-  need_approx_global_ = other.need_approx_global_;
-  need_part_ = other.need_part_;
-  need_subpart_ = other.need_subpart_;
+  global_stat_param_ = other.global_stat_param_;
+  part_stat_param_ = other.part_stat_param_;
+  subpart_stat_param_ = other.subpart_stat_param_;
   granularity_ = other.granularity_;
   cascade_ = other.cascade_;
   stat_tab_ = other.stat_tab_;
@@ -117,6 +116,7 @@ int ObTableStatParam::assign(const ObTableStatParam &other)
   data_table_id_ = other.data_table_id_;
   need_estimate_block_ = other.need_estimate_block_;
   is_temp_table_ = other.is_temp_table_;
+  allocator_ = other.allocator_;
   if (OB_FAIL(part_infos_.assign(other.part_infos_))) {
     LOG_WARN("failed to assign", K(ret));
   } else if (OB_FAIL(subpart_infos_.assign(other.subpart_infos_))) {
@@ -148,10 +148,9 @@ int ObTableStatParam::assign_common_property(const ObTableStatParam &other)
   sample_info_.sample_value_ = other.sample_info_.sample_value_;
   method_opt_ = other.method_opt_;
   degree_ = other.degree_;
-  need_global_ = other.need_global_;
-  need_approx_global_ = other.need_approx_global_;
-  need_part_ = other.need_part_;
-  need_subpart_ = other.need_subpart_;
+  global_stat_param_ = other.global_stat_param_;
+  part_stat_param_ = other.part_stat_param_;
+  subpart_stat_param_ = other.subpart_stat_param_;
   granularity_ = other.granularity_;
   cascade_ = other.cascade_;
   stat_tab_ = other.stat_tab_;
@@ -163,6 +162,7 @@ int ObTableStatParam::assign_common_property(const ObTableStatParam &other)
   stattype_ = other.stattype_;
   need_approx_ndv_ = other.need_approx_ndv_;
   duration_time_ = other.duration_time_;
+  allocator_ = other.allocator_;
   return ret;
 }
 

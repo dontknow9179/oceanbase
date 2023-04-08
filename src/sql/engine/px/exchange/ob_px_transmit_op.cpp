@@ -114,7 +114,7 @@ ObPxTransmitSpec::ObPxTransmitSpec(ObIAllocator &alloc, const ObPhyOperatorType 
       sampling_saving_row_(alloc),
       repartition_table_id_(0),
       wf_hybrid_aggr_status_expr_(NULL),
-      wf_hybrid_pby_exprs_cnt_array_()
+      wf_hybrid_pby_exprs_cnt_array_(alloc)
 {
 }
 
@@ -332,6 +332,7 @@ int ObPxTransmitOp::init_channel(ObPxTransmitOpInput &trans_input)
     loop_.register_processor(dfc_unblock_msg_proc_)
         .register_interrupt_processor(interrupt_proc_);
     loop_.set_process_query_time(ctx_.get_my_session()->get_process_query_time());
+    loop_.set_query_timeout_ts(ctx_.get_physical_plan_ctx()->get_timeout_timestamp());
     bool use_interm_result = false;
     int64_t px_batch_id = ctx_.get_px_batch_id();
     ObPxSQCProxy *sqc_proxy = NULL;
@@ -574,7 +575,6 @@ int ObPxTransmitOp::send_rows_one_by_one(ObSliceIdxCalc &slice_calc)
         } else if (OB_FAIL(send_eof_row())) { // overwrite err code
           LOG_WARN("fail send eof rows to channels", K(ret));
         }
-        op_monitor_info_.db_time_ += (rdtsc() - begin_cpu_time);
         break;
       }
     }
@@ -603,7 +603,6 @@ int ObPxTransmitOp::send_rows_one_by_one(ObSliceIdxCalc &slice_calc)
         }
       }
     }
-    op_monitor_info_.db_time_ += (rdtsc() - begin_cpu_time);
   }
   if (OB_ITER_END == ret) {
     ret = OB_SUCCESS;
@@ -628,7 +627,11 @@ int ObPxTransmitOp::send_rows_in_batch(ObSliceIdxCalc &slice_calc)
     }
     uint64_t begin_cpu_time = rdtsc();
     if (dfc_.all_ch_drained()) {
-      LOG_DEBUG("all channel has been drained");
+      int tmp_ret = drain_exch();
+      if (OB_SUCCESS != tmp_ret) {
+        LOG_WARN("drain exchange data failed", K(tmp_ret));
+      }
+      LOG_TRACE("all channel has been drained");
       break;
     }
     const ObPxTransmitSpec &spec = static_cast<const ObPxTransmitSpec &>(get_spec());
@@ -716,11 +719,9 @@ int ObPxTransmitOp::send_rows_in_batch(ObSliceIdxCalc &slice_calc)
       } else if (OB_FAIL(send_eof_row())) {
         LOG_WARN("fail send eof rows to channels", K(ret));
       }
-      op_monitor_info_.db_time_ += (rdtsc() - begin_cpu_time);
       break;
     }
     // for those break out ops
-    op_monitor_info_.db_time_ += (rdtsc() - begin_cpu_time);
   }
   LOG_TRACE("Transmit time record", K(row_count), K(ret));
   return ret;
@@ -1024,7 +1025,7 @@ int ObPxTransmitOp::do_datahub_dynamic_sample(int64_t op_id, ObDynamicSamplePiec
     bool send_piece = true;
     if (OB_FAIL(proxy.make_sqc_sample_piece_msg(piece_msg, send_piece))) {
       LOG_WARN("fail to make sqc sample piece msg", K(ret));
-    } else if (OB_FAIL(proxy.get_dh_msg(op_id,
+    } else if (OB_FAIL(proxy.get_dh_msg_sync(op_id,
         DH_DYNAMIC_SAMPLE_WHOLE_MSG,
         proxy.get_piece_sample_msg(),
         temp_whole_msg,

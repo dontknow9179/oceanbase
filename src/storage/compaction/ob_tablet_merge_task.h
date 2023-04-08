@@ -50,6 +50,7 @@ class ObTabletMergeDag;
 struct ObTabletMergeCtx;
 class ObTabletMergeInfo;
 class ObPartitionMerger;
+struct ObCachedTransStateMgr;
 
 
 struct ObMergeParameter {
@@ -73,6 +74,7 @@ struct ObMergeParameter {
   share::ObScnRange scn_range_;
   const ObTableReadInfo *full_read_info_; // full read info of old tablet
   bool is_full_merge_;               // full merge or increment merge, duplicated with merge_level
+  compaction::ObCachedTransStateMgr *trans_state_mgr_;
 
   TO_STRING_KV(KPC_(tables_handle), K_(merge_type), K_(merge_level), KP_(merge_schema),
       K_(merge_range), K_(version_range), K_(scn_range), K_(is_full_merge));
@@ -216,7 +218,7 @@ public:
   int get_tablet_and_compat_mode();
   virtual int64_t to_string(char* buf, const int64_t buf_len) const override;
   virtual lib::Worker::CompatMode get_compat_mode() const override { return compat_mode_; }
-
+  virtual uint64_t get_consumer_group_id() const override { return consumer_group_id_; }
   static int generate_merge_task(
       ObBasicTabletMergeDag &merge_dag,
       ObTabletMergeCtx &ctx,

@@ -23,6 +23,7 @@ namespace storage
 
 int ObUndoStatusList::serialize(char *buf, const int64_t buf_len, int64_t &pos) const
 {
+  SpinRLockGuard guard(lock_);
   int ret = OB_SUCCESS;
   const int64_t len = get_serialize_size_();
   if (OB_UNLIKELY(OB_ISNULL(buf) || buf_len <= 0 || pos > buf_len)) {
@@ -73,6 +74,7 @@ int ObUndoStatusList::deserialize(const char *buf,
   int ret = OB_SUCCESS;
   int64_t version = 0;
   int64_t undo_status_list_len = 0;
+  SpinWLockGuard guard(lock_);
 
   if (OB_FAIL(serialization::decode_vi64(buf, data_len, pos, &version))) {
     STORAGE_LOG(WARN, "decode version fail", K(version), K(data_len), K(pos), K(ret));
@@ -112,12 +114,16 @@ int ObUndoStatusList::deserialize_(const char *buf,
     LST_DO_CODE(OB_UNIS_DECODE, action);
     // allcate new undo status node if needed
     if (OB_ISNULL(cur_node) || cur_node->size_ >= TX_DATA_UNDO_ACT_MAX_NUM_PER_NODE) {
-      void *buf = nullptr;
-      if (OB_ISNULL(buf = slice_allocator.alloc())) {
+      void *undo_node_buf = nullptr;
+#ifdef OB_ENABLE_SLICE_ALLOC_LEAK_DEBUG
+      if (OB_ISNULL(undo_node_buf = slice_allocator.alloc(true /*record_alloc_lbt*/))) {
+#else
+      if (OB_ISNULL(undo_node_buf = slice_allocator.alloc())) {
+#endif
         ret = OB_ALLOCATE_MEMORY_FAILED;
         STORAGE_LOG(WARN, "allocate memory when deserialize ObTxData failed.", KR(ret));
       } else {
-        cur_node = new (buf) ObUndoStatusNode;
+        cur_node = new (undo_node_buf) ObUndoStatusNode;
 
         // update undo status list link after allocated new node
         ObUndoStatusNode *tmp_node = head_;
@@ -126,7 +132,14 @@ int ObUndoStatusList::deserialize_(const char *buf,
       }
     }
 
-    cur_node->undo_actions_[cur_node->size_++] = action;
+    if (OB_SUCC(ret)) {
+      if (OB_NOT_NULL(cur_node)) {
+        cur_node->undo_actions_[cur_node->size_++] = action;
+      } else {
+        ret = OB_ERR_UNEXPECTED;
+        STORAGE_LOG(ERROR, "unexpected nullptr when deserialize undo status list", KR(ret), KP(buf), K(pos), K(data_len));
+      }
+    }
   }
 
   return ret;
@@ -134,6 +147,7 @@ int ObUndoStatusList::deserialize_(const char *buf,
 
 int64_t ObUndoStatusList::get_serialize_size() const
 {
+  SpinRLockGuard guard(lock_);
   int64_t data_len = get_serialize_size_();
   int64_t len = 0;
   len += serialization::encoded_length_vi64(UNIS_VERSION);
@@ -460,13 +474,20 @@ int ObTxData::add_undo_action(ObTxTable *tx_table, transaction::ObUndoAction &ne
         undo_status_list_.undo_node_cnt_++;
       }
     }
-    node->undo_actions_[node->size_++] = new_undo_action;
+
+    if (OB_SUCC(ret)) {
+      if (OB_NOT_NULL(node)) {
+        node->undo_actions_[node->size_++] = new_undo_action;
+      } else {
+        ret = OB_ERR_UNEXPECTED;
+        STORAGE_LOG(ERROR, "node is unexpected nullptr", KR(ret), KPC(this));
+      }
+    }
   }
 
   if (OB_NOT_NULL(undo_node)) {
     tx_data_table->free_undo_status_node(undo_node);
   }
-
   return ret;
 }
 
@@ -487,6 +508,7 @@ int ObTxData::merge_undo_actions_(ObTxDataTable *tx_data_table,
     }
 
     if (0 == node->size_) {
+      // fprintf(stdout, "free undo node, node ptr = %p \n", node);
       // all undo actions in this node are merged, free it
       // STORAGE_LOG(DEBUG, "current node is empty, now free it");
       ObUndoStatusNode *node_to_free = node;

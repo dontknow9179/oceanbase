@@ -81,6 +81,7 @@ int ObCreateIndexExecutor::execute(ObExecContext &ctx, ObCreateIndexStmt &stmt)
     //impossible
   } else if (FALSE_IT(create_index_arg.is_inner_ = my_session->is_inner())) {
   } else if (FALSE_IT(create_index_arg.parallelism_ = stmt.get_parallelism())) {
+  } else if (FALSE_IT(create_index_arg.consumer_group_id_ = THIS_WORKER.get_group_id())) {
   } else if (OB_FAIL(common_rpc_proxy->create_index(create_index_arg, res))) {    //send the signal of creating index to rs
     LOG_WARN("rpc proxy create index failed", K(create_index_arg),
              "dst", common_rpc_proxy->get_server(), K(ret));
@@ -293,6 +294,7 @@ int ObDropIndexExecutor::wait_drop_index_finish(
     while (OB_SUCC(ret)) {
       int tmp_ret = OB_SUCCESS;
       bool is_tenant_dropped = false;
+      bool is_tenant_standby = false;
       if (OB_SUCCESS == share::ObDDLErrorMessageTableOperator::get_ddl_error_message(
           tenant_id, task_id, -1 /* target_object_id */, unused_addr, false /* is_ddl_retry_task */, *GCTX.sql_proxy_, error_message, unused_user_msg_len)) {
         ret = error_message.ret_code_;
@@ -300,17 +302,29 @@ int ObDropIndexExecutor::wait_drop_index_finish(
           FORWARD_USER_ERROR(ret, error_message.user_message_);
         }
         break;
-      } else if (OB_TMP_FAIL(GSCHEMASERVICE.check_if_tenant_has_been_dropped(
-                               tenant_id, is_tenant_dropped))) {
-        LOG_WARN("check if tenant has been dropped failed", K(tmp_ret), K(tenant_id));
-      } else if (is_tenant_dropped) {
-        ret = OB_TENANT_HAS_BEEN_DROPPED;
-        LOG_WARN("tenant has been dropped", K(ret), K(tenant_id));
-        break;
-      } else if (OB_FAIL(session.check_session_status())) {
-        LOG_WARN("session exeception happened", K(ret));
       } else {
-        ob_usleep(retry_interval);
+        if (OB_FAIL(ret)) {
+        } else if (OB_TMP_FAIL(GSCHEMASERVICE.check_if_tenant_has_been_dropped(
+                                tenant_id, is_tenant_dropped))) {
+          LOG_WARN("check if tenant has been dropped failed", K(tmp_ret), K(tenant_id));
+        } else if (is_tenant_dropped) {
+          ret = OB_TENANT_HAS_BEEN_DROPPED;
+          LOG_WARN("tenant has been dropped", K(ret), K(tenant_id));
+        }
+        if (OB_FAIL(ret)) {
+        } else if (OB_TMP_FAIL(ObAllTenantInfoProxy::is_standby_tenant(GCTX.sql_proxy_, tenant_id, is_tenant_standby))) {
+          LOG_WARN("check is standby tenant failed", K(tmp_ret), K(tenant_id));
+        } else if (is_tenant_standby) {
+          ret = OB_STANDBY_READ_ONLY;
+          FORWARD_USER_ERROR(ret, "DDL not finish, need check");
+          LOG_WARN("tenant is standby now, stop wait", K(ret), K(tenant_id));
+        }
+        if (OB_FAIL(ret)) {
+        } else if (OB_FAIL(session.check_session_status())) {
+          LOG_WARN("session exeception happened", K(ret));
+        } else {
+          ob_usleep(retry_interval);
+        }
       }
     }
   }
@@ -323,14 +337,16 @@ int ObDropIndexExecutor::execute(ObExecContext &ctx, ObDropIndexStmt &stmt)
   ObTaskExecutorCtx *task_exec_ctx = NULL;
   obrpc::ObCommonRpcProxy *common_rpc_proxy = NULL;
   const obrpc::ObDropIndexArg &drop_index_arg = stmt.get_drop_index_arg();
+  obrpc::ObDropIndexArg &tmp_arg = const_cast<obrpc::ObDropIndexArg&>(drop_index_arg);
   ObSQLSessionInfo *my_session = ctx.get_my_session();
   ObString first_stmt;
   ObDropIndexRes res;
-  const_cast<obrpc::ObDropIndexArg &>(drop_index_arg).is_add_to_scheduler_ = true;
+  tmp_arg.is_add_to_scheduler_ = true;
   if (OB_FAIL(stmt.get_first_stmt(first_stmt))) {
     LOG_WARN("fail to get first stmt" , K(ret));
   } else {
-    const_cast<obrpc::ObDropIndexArg&>(drop_index_arg).ddl_stmt_str_ = first_stmt;
+    tmp_arg.ddl_stmt_str_ = first_stmt;
+
   }
   if (OB_FAIL(ret)) {
   } else if (NULL == my_session) {
@@ -345,8 +361,9 @@ int ObDropIndexExecutor::execute(ObExecContext &ctx, ObDropIndexStmt &stmt)
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("common rpc proxy should not be null", K(ret));
   }  else if (OB_INVALID_ID == drop_index_arg.session_id_
-             && FALSE_IT(const_cast<obrpc::ObDropIndexArg&>(drop_index_arg).session_id_ = my_session->get_sessid_for_table())) {
+             && FALSE_IT(tmp_arg.session_id_ = my_session->get_sessid_for_table())) {
     //impossible
+  } else if (FALSE_IT(tmp_arg.consumer_group_id_ = THIS_WORKER.get_group_id())) {
   } else if (OB_FAIL(common_rpc_proxy->drop_index(drop_index_arg, res))) {
     LOG_WARN("rpc proxy drop index failed", "dst", common_rpc_proxy->get_server(), K(ret));
   } else if (OB_FAIL(wait_drop_index_finish(res.tenant_id_, res.task_id_, *my_session))) {

@@ -100,7 +100,6 @@ void ObOptimizerStatsGatheringOp::reset() {
 }
 
 void ObOptimizerStatsGatheringOp::reuse_stats() {
-  // call each column stat's reset to free memory allocated by inner_max_alloc and inner_min_alloc
   FOREACH(it, column_stats_map_) {
     if (OB_NOT_NULL(it->second)) {
       it->second->reset();
@@ -489,9 +488,18 @@ void ObOptimizerStatsGatheringOp::set_col_stats_avg_len(StatItems &all_stats, in
 int ObOptimizerStatsGatheringOp::set_col_stats(StatItems &all_stats, ObObj &obj)
 {
   int ret = OB_SUCCESS;
+  const ObObj *tmp_obj;
+  if (OB_FAIL(ObOptimizerUtil::truncate_string_for_opt_stats(&obj, arena_, tmp_obj))) {
+    LOG_WARN("fail to truncate string", K(ret));
+  } else {
+    obj = *tmp_obj;
+  }
+
   all_stats.global_col_stat_->set_stat_level(StatLevel::TABLE_LEVEL);
-  if (OB_FAIL(all_stats.global_col_stat_->merge_obj(obj))) {
-    LOG_WARN("fail to set global column stat", K(ret), K(obj));
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(all_stats.global_col_stat_->merge_obj(obj))) {
+      LOG_WARN("fail to set global column stat", K(ret), K(obj));
+    }
   }
   if (OB_SUCC(ret) && MY_SPEC.is_part_table()) {
     all_stats.part_col_stat_->set_stat_level(StatLevel::PARTITION_LEVEL);
@@ -583,10 +591,8 @@ int ObOptimizerStatsGatheringOp::merge_col_stat(ObOptColumnStat *src_col_stat)
       } else {
       }
     }
-  } else {
-    if (OB_FAIL(col_stat->merge_column_stat(*src_col_stat))) {
-      LOG_WARN("fail to merge two table stats", K(ret), K(col_stat), K(src_col_stat));
-    }
+  } else if (OB_FAIL(col_stat->merge_column_stat(*src_col_stat))) {
+    LOG_WARN("fail to merge two table stats", K(ret), K(col_stat), K(src_col_stat));
   }
   return ret;
 }
@@ -656,13 +662,14 @@ int ObOptimizerStatsGatheringOp::generate_stat_param(ObTableStatParam &param)
   } else {
     param.tenant_id_ = tenant_id_;
     param.table_id_ = MY_SPEC.table_id_;
-    param.need_global_ = true;
+    param.global_stat_param_.need_modify_ = true;
     param.part_level_ = MY_SPEC.part_level_;
+    param.allocator_ = &ctx_.get_allocator();
     if (!MY_SPEC.is_part_table()) {
       param.global_part_id_ = MY_SPEC.table_id_;
       param.global_tablet_id_ = MY_SPEC.table_id_;
-      param.need_part_ = false;
-      param.need_subpart_ = false;
+      param.part_stat_param_.need_modify_ = false;
+      param.subpart_stat_param_.need_modify_ = false;
     } else {
       param.global_part_id_ = -1;
       param.global_tablet_id_ = -1;
@@ -687,8 +694,8 @@ int ObOptimizerStatsGatheringOp::generate_stat_param(ObTableStatParam &param)
 
     if (OB_FAIL(ret)) {
     } else if (MY_SPEC.is_part_table() && !MY_SPEC.is_two_level_part()) {
-      param.need_part_ = true;
-      param.need_subpart_ = false;
+      param.part_stat_param_.need_modify_ = true;
+      param.subpart_stat_param_.need_modify_ = false;
     } else if (MY_SPEC.is_part_table() && MY_SPEC.is_two_level_part()){
       //default is true
     }

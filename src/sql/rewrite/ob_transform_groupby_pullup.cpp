@@ -305,7 +305,7 @@ int ObTransformGroupByPullup::check_groupby_pullup_validity(ObDMLStmt *stmt,
     } else if (OB_FAIL(check_hint_valid(*stmt, *table->ref_query_, hint_valid))) {
       LOG_WARN("check hint failed", K(ret));
     } else if (!hint_valid) {
-      is_valid = false;
+      // can not set is_valid as false, may pullup other table
       OPT_TRACE("hint reject transform");
     } else if (OB_FALSE_IT(myhint = static_cast<const ObViewMergeHint*>(sub_stmt->get_stmt_hint().get_normal_hint(T_MERGE_HINT)))) {
     } else if (ignore_tables.has_member(stmt->get_table_bit_index(table->table_id_))) {
@@ -329,7 +329,7 @@ int ObTransformGroupByPullup::check_groupby_pullup_validity(ObDMLStmt *stmt,
       //do nothing
     } else if (OB_FAIL(sub_stmt->has_rand(has_rand))) {
       LOG_WARN("failed to check stmt has rand func", K(ret));
-      //stmt不能包含rand函数 https://work.aone.alibaba-inc.com/issue/35875561
+      //stmt不能包含rand函数
     } else if (!(can_pullup = !has_rand)) {
       // do nothing
       OPT_TRACE("view has rand expr, can not transform");
@@ -344,6 +344,8 @@ int ObTransformGroupByPullup::check_groupby_pullup_validity(ObDMLStmt *stmt,
     JoinedTable *joined_table = static_cast<JoinedTable*>(table);
     PullupHelper left_helper = helper;
     PullupHelper right_helper = helper;
+    bool check_left = true;
+    bool check_right = true;
     left_helper.parent_table_ = joined_table;
     right_helper.parent_table_ = joined_table;
     if (LEFT_OUTER_JOIN == joined_table->joined_type_) {
@@ -351,10 +353,12 @@ int ObTransformGroupByPullup::check_groupby_pullup_validity(ObDMLStmt *stmt,
       //LEFT OUTER JOIN的右表上拉group by要求不能有having条件
       right_helper.need_check_having_ = true;
       right_helper.need_check_null_propagate_ = true;
+      check_left = false;
     } else if (RIGHT_OUTER_JOIN == joined_table->joined_type_) {
       //RIGHT OUTER JOIN的左表上拉group by要求不能有having条件
       left_helper.need_check_having_ = true;
       left_helper.need_check_null_propagate_ = true;
+      check_right = false;
       //LEFT OUTER JOIN的右表行为跟parent table相同
     } else if (INNER_JOIN == joined_table->joined_type_) {
       //INNER JOIN的左表行为跟parent table相同
@@ -369,6 +373,8 @@ int ObTransformGroupByPullup::check_groupby_pullup_validity(ObDMLStmt *stmt,
         //full join要求两侧至少有一个basic table，否则不能保证能够生成严格唯一键
         is_valid = false;
       } else {
+        check_left = false;
+        check_right = false;
         left_helper.need_check_having_ = true;
         left_helper.need_check_null_propagate_ = true;
         right_helper.need_check_having_ = true;
@@ -379,7 +385,8 @@ int ObTransformGroupByPullup::check_groupby_pullup_validity(ObDMLStmt *stmt,
       //do nothing
     } else if (!is_valid) {
       //do nothing
-    } else if (OB_FAIL(SMART_CALL(check_groupby_pullup_validity(stmt,
+    } else if (check_left &&
+               OB_FAIL(SMART_CALL(check_groupby_pullup_validity(stmt,
                                                                 joined_table->left_table_,
                                                                 left_helper,
                                                                 contain_inner_table,
@@ -387,7 +394,8 @@ int ObTransformGroupByPullup::check_groupby_pullup_validity(ObDMLStmt *stmt,
                                                                 valid_views,
                                                                 is_valid)))) {
       LOG_WARN("failed to check group by pull up validity", K(ret));
-    } else if (OB_FAIL(SMART_CALL(check_groupby_pullup_validity(stmt,
+    } else if (check_right &&
+               OB_FAIL(SMART_CALL(check_groupby_pullup_validity(stmt,
                                                                 joined_table->right_table_,
                                                                 right_helper,
                                                                 contain_inner_table,
@@ -1071,11 +1079,11 @@ int ObTransformGroupByPullup::need_transform(const common::ObIArray<ObParentDMLS
       } else {
         need_trans = query_hint->is_valid_outline_transform(ctx_->trans_list_loc_,
                                                   get_hint(table->ref_query_->get_stmt_hint()));
-        if (!need_trans) {
-          OPT_TRACE("outline reject transform");
-        }
         LOG_DEBUG("need trans pullup0", K(need_trans));
       }
+    }
+    if (OB_SUCC(ret) && !need_trans) {
+      OPT_TRACE("outline reject transform");
     }
   }
   LOG_DEBUG("need trans pullup", K(need_trans));

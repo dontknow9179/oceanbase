@@ -588,6 +588,7 @@ int ObTransformSimplifySubquery::try_push_down_outer_join_conds(ObDMLStmt *stmt,
   } else {
     ObSEArray<ObRawExpr*, 16> push_down_conds;
     TableItem *view_item = NULL;
+    TableItem *right_table = join_table->right_table_;
     if (OB_FAIL(get_push_down_conditions(stmt,
                                          join_table,
                                          join_table->get_join_conditions(),
@@ -595,52 +596,25 @@ int ObTransformSimplifySubquery::try_push_down_outer_join_conds(ObDMLStmt *stmt,
       LOG_WARN("failed to get_push_down_conditions", K(ret), K(join_table));
     } else if (push_down_conds.empty()) {
       /*do nothing*/
-    } else if (OB_FAIL(ObTransformUtils::create_view_with_table(stmt, ctx_,
-                                                                join_table->right_table_,
-                                                                view_item))) {
-      LOG_WARN("failed to create view with table", K(ret));
-    } else if (OB_FAIL(push_down_on_condition(stmt, join_table, push_down_conds))) {
-      LOG_WARN("failed to push down on condition", K(ret));
+    } else if (ObOptimizerUtil::remove_item(join_table->get_join_conditions(), push_down_conds)) {
+      LOG_WARN("failed to remove item", K(ret));
+    } else if (OB_FAIL(ObTransformUtils::replace_with_empty_view(ctx_,
+                                                                 stmt,
+                                                                 view_item,
+                                                                 right_table))) {
+      LOG_WARN("failed to create empty view table", K(ret));
+    } else if (OB_FAIL(ObTransformUtils::create_inline_view(ctx_,
+                                                            stmt,
+                                                            view_item,
+                                                            right_table,
+                                                            &push_down_conds))) {
+      LOG_WARN("failed to create inline view", K(ret));
     } else {
       trans_happened = true;
     }
   }
   return ret;
 }
-
-//将left join 部分连接条件conds 下推到 right generate table
-//right table 为仅含 select 输出的 generate table
-int ObTransformSimplifySubquery::push_down_on_condition(ObDMLStmt *stmt,
-                                                JoinedTable *join_table,
-                                                ObIArray<ObRawExpr*> &conds) {
-  int ret = OB_SUCCESS;
-  ObSEArray<ObRawExpr *, 16> new_conds;
-  ObSelectStmt *child_stmt = NULL;
-  if (OB_ISNULL(stmt) || OB_ISNULL(ctx_) || OB_ISNULL(join_table) ||
-      OB_ISNULL(ctx_->expr_factory_) || OB_ISNULL(ctx_->allocator_) ||
-      OB_ISNULL(join_table->right_table_)) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("unexpected NULL", K(ret));
-  } else if (!join_table->is_left_join() || !join_table->right_table_->is_generated_table()
-             || OB_ISNULL(child_stmt = join_table->right_table_->ref_query_)) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("unexpected join table", K(ret));
-  } else if (OB_FAIL(ObOptimizerUtil::remove_item(join_table->get_join_conditions(), conds))) {
-    LOG_WARN("failed to remove item", K(ret));
-  } else if (OB_FAIL(ObTransformUtils::move_expr_into_view(*ctx_->expr_factory_,
-                                                           *stmt,
-                                                           *join_table->right_table_,
-                                                           conds,
-                                                           new_conds))) {
-    LOG_WARN("failed to move expr into view", K(ret));
-  } else if (OB_FAIL(child_stmt->add_condition_exprs(new_conds))) {
-    LOG_WARN("failed to add new conditions exprs", K(ret));
-  } else if (OB_FAIL(stmt->formalize_stmt(ctx_->session_info_))) {
-    LOG_WARN("failed to formalize stmt", K(ret));
-  }
-  return ret;
-}
-
 
 int ObTransformSimplifySubquery::add_limit_for_exists_subquery(ObDMLStmt *stmt,
                                                                bool &trans_happened)
@@ -708,15 +682,9 @@ int ObTransformSimplifySubquery::recursive_add_limit_for_exists_expr(ObRawExpr *
         ObSelectStmt *subquery = NULL;
         ObOpRawExpr *op = static_cast<ObOpRawExpr*>(expr);
         ObQueryRefRawExpr *subq_expr = static_cast<ObQueryRefRawExpr *>(op->get_param_expr(0));
-        bool from_one_dblink = false;
         if (OB_ISNULL(subq_expr) || OB_ISNULL(subquery = subq_expr->get_ref_stmt())) {
           ret = OB_ERR_UNEXPECTED;
           LOG_WARN("get unexpected null ptr", K(ret), K(subq_expr), K(subquery));
-        } else if (OB_FAIL(ObTransformUtils::check_stmt_from_one_dblink(subquery, from_one_dblink))) {
-          LOG_WARN("failed to check if all tables from one dblink", K(ret));
-        } else if (from_one_dblink) {
-          // do not transform,
-          // for compatibility with Oracle before 12c
         } else if (!subquery->has_limit() && !subquery->is_contains_assignment()) {
           if (OB_FAIL(ObTransformUtils::set_limit_expr(subquery, ctx_))) {
             LOG_WARN("add limit expr failed", K(*subquery), K(ret));
@@ -1169,7 +1137,7 @@ int ObTransformSimplifySubquery::transform_one_expr(ObDMLStmt *stmt, ObRawExpr *
   if (OB_ISNULL(stmt) || OB_ISNULL(expr)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("NULL pointer error", K(ret));
-  //bug:https://work.aone.alibaba-inc.com/issue/25356955 暂时禁掉含有rownum的condition
+  //bug:
   } else if (expr->has_flag(CNT_ROWNUM)) {
     /*do nothing */
   } else if (OB_FAIL(recursive_eliminate_subquery(stmt, expr, trans_happened))) {
@@ -1355,8 +1323,8 @@ bool ObTransformSimplifySubquery::is_subquery_not_empty(const ObSelectStmt &stmt
 }
 
 int ObTransformSimplifySubquery::select_items_can_be_simplified(const ObItemType op_type,
-                                                         const ObSelectStmt *stmt,
-                                                         bool &can_be_simplified) const
+                                                                const ObSelectStmt *stmt,
+                                                                bool &can_be_simplified) const
 {
   /*
   * 1. calculate max_select_item_size
@@ -1373,11 +1341,16 @@ int ObTransformSimplifySubquery::select_items_can_be_simplified(const ObItemType
   if (OB_ISNULL(stmt)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("stmt is invalid", K(ret), K(stmt));
-  } else if (stmt->is_set_stmt()) {
-    /*do nothing*/
+  } else if (stmt->is_set_stmt() &&
+             (ObSelectStmt::INTERSECT == stmt->get_set_op() ||
+              ObSelectStmt::EXCEPT == stmt->get_set_op() ||
+              stmt->is_recursive_union())) {
+    //do nothing
   } else if (OB_FAIL(check_limit(op_type, stmt, has_limit))) {
     LOG_WARN("failed to check limit", K(ret));
-  } else if (has_limit && stmt->has_distinct()) {
+  } else if (has_limit &&
+            (stmt->has_distinct() ||
+             (stmt->is_set_stmt() && stmt->is_set_distinct()))) {
     /*
     create table t1(a int);
     insert into t1 values (1),(2),(3),(4);
@@ -1454,7 +1427,7 @@ int ObTransformSimplifySubquery::groupby_can_be_eliminated_in_any_all(const ObSe
         ret = OB_INVALID_ARGUMENT;
         LOG_WARN("select list expr is NULL", K(ret));
       } else if ((s_expr)->has_flag(CNT_COLUMN)) {
-        if (!ObOptimizerUtil::find_equal_expr(stmt->get_group_exprs(), s_expr)) {
+        if (!ObOptimizerUtil::find_item(stmt->get_group_exprs(), s_expr)) {
           all_in_group_exprs = false;
         } else { /* do nothing */ }
       } else { /* do nothing */ }
@@ -1495,8 +1468,8 @@ int ObTransformSimplifySubquery::eliminate_subquery_in_exists(ObDMLStmt *stmt,
     } else if (OB_FAIL(ObOptimizerUtil::remove_item(stmt->get_subquery_exprs(), subq_expr))) {
       LOG_WARN("remove expr failed", K(ret));
     } else {
-      ObConstRawExpr *c_expr = NULL;
-      if (OB_FAIL(ObRawExprUtils::build_const_int_expr(*expr_factory, ObIntType, (T_OP_EXISTS == expr->get_expr_type()), c_expr))) {
+      ObRawExpr *c_expr = NULL;
+      if (OB_FAIL(ObRawExprUtils::build_const_bool_expr(expr_factory, c_expr, (T_OP_EXISTS == expr->get_expr_type())))) {
         LOG_WARN("failed to create expr", K(ret));
       } else if (OB_ISNULL(c_expr)) {
         ret = OB_ERR_UNEXPECTED;
@@ -1526,8 +1499,13 @@ int ObTransformSimplifySubquery::simplify_select_items(ObDMLStmt *stmt,
         OB_ISNULL(expr_factory = ctx_->expr_factory_)) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("NULL pointer Error", KP(subquery), KP_(ctx), KP(expr_factory), K(ret));
+    } else if (OB_FAIL(select_items_can_be_simplified(op_type,
+                                                      subquery,
+                                                      can_be_simplified))) {
+      LOG_WARN("Checking if select list can be eliminated in subquery failed", K(ret));
+    } else if (!can_be_simplified) {
+      //do nothing
     } else if (ObSelectStmt::UNION == subquery->get_set_op() && !subquery->is_recursive_union()) {
-
         const ObIArray<ObSelectStmt*> &child_stmts = subquery->get_set_query();
         for (int64_t i = 0; OB_SUCC(ret) && i < child_stmts.count(); ++i) {
           ObSelectStmt *child = child_stmts.at(i);
@@ -1535,7 +1513,6 @@ int ObTransformSimplifySubquery::simplify_select_items(ObDMLStmt *stmt,
             LOG_WARN("Simplify select list in EXISTS fails", K(ret));
           }
         }
-        //union -> union all
         bool has_limit = false;
         bool add_limit_constraint = false;
         if (OB_FAIL(ret)){
@@ -1550,12 +1527,6 @@ int ObTransformSimplifySubquery::simplify_select_items(ObDMLStmt *stmt,
         } else if (!has_limit) {
           subquery->assign_set_all();
         }
-    } else if (OB_FAIL(select_items_can_be_simplified(op_type,
-                                              subquery,
-                                              can_be_simplified))) {
-      LOG_WARN("Checking if select list can be eliminated in subquery failed", K(ret));
-    } else if (!can_be_simplified) {
-
     } else {
       // Add single select item with const int 1
         int64_t const_value = 1;

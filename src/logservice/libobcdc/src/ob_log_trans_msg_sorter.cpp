@@ -34,7 +34,7 @@
         if (err_no == ret) { \
           retry_cnt ++; \
           if (0 == retry_cnt % 200) { \
-            LOG_WARN(#func "retry for too many times", KP(&var), K(var)); \
+            LOG_WARN(#func " retry for too many times", KP(&var), K(var)); \
           } \
           /* sleep 5 ms*/ \
           ob_usleep(5 * 1000); \
@@ -125,7 +125,7 @@ int ObLogTransMsgSorter::start()
 
   LOG_INFO("begin start TransMsgSorter");
 
-  if (OB_FAIL(TransMsgSorterThread::init(thread_num_, task_limit_, "oblog-br-sorter"))) {
+  if (OB_FAIL(TransMsgSorterThread::init(thread_num_, task_limit_, "obcdc-br-sorter"))) {
     LOG_ERROR("failed to init sorter thread pool", KR(ret), K_(thread_num), K_(task_limit));
   } else {
     inited_ = true;

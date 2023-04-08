@@ -1,8 +1,8 @@
 // Copyright 2010-2016 Alibaba Inc. All Rights Reserved.
 // Author:
-//   juehui.lgy@alibaba-inc.com
+//
 // Normalizer:
-//   juehui.lgy@alibaba-inc.com
+//
 // this file defines implementation of full link trace span manager
 
 
@@ -133,7 +133,7 @@ namespace sql
       session.set_auto_flush_trace(false);
       session.set_trace_enable(false);
     }
-    OZ(ObFLTUtils::init_flt_show_trace_env(session));
+    OBTRACE->set_enable_show_trace(session.is_use_trace_log());
     return ret;
   }
 
@@ -265,7 +265,9 @@ namespace sql
               LOG_WARN("failed to deserialize full link trace extra info",
                                         KP(buf), K(ret), K(pos), K(v_len));
             } else {
-              _OBTRACE_LOG(INFO, "%s", drv_span.span_info_.ptr());
+              PRINT_WITH_TRACE_MODE(FLT, INFO, [&] {
+                _FLT_LOG(INFO, "%s", drv_span.span_info_.ptr());
+              }());
             }
             break;
           }
@@ -412,7 +414,7 @@ namespace sql
         sid.deserialize(span_id.ptr(), span_id.length(), pos);
         OBTRACE->init(tid, sid);
         FLT_SET_TRACE_LEVEL(sess.get_control_info().level_);
-        FLT_SET_AUTO_FLUSH(sess.is_auto_flush_trace());
+        FLT_SET_AUTO_FLUSH(sess.is_auto_flush_trace() || sess.is_use_trace_log());
       }
     // update trace_id by server self
     } else {
@@ -429,7 +431,7 @@ namespace sql
         }
       }
       FLT_SET_TRACE_LEVEL(sess.get_control_info().level_);
-      FLT_SET_AUTO_FLUSH(sess.is_auto_flush_trace());
+      FLT_SET_AUTO_FLUSH(sess.is_auto_flush_trace() || sess.is_use_trace_log());
     }
 
     LOG_TRACE("flt init log", K(sess.is_trace_enable()),
@@ -501,6 +503,8 @@ namespace sql
 
     if (OB_ISNULL(flt_span_manager)) {
       // failed to get flt span manager, maybe tenant has been dropped, NOT NEED TO record;
+    } else if (!OBTRACE->is_enable_show_trace()) {
+      // do nothing
     } else {
       ObFLTSpanData data;
       ObArenaAllocator allocator;

@@ -14,7 +14,6 @@
 #include <algorithm>                                    // std::sort
 #include <cstdio>                                       // renameat
 #include <fcntl.h>                                      // ::open
-#include "lib/lock/ob_spin_lock.h"
 #include "lib/ob_define.h"                              // some constexpr
 #include "lib/ob_errno.h"                               // OB_SUCCESS...
 #include "lib/container/ob_se_array_iterator.h"         // ObSEArrayIterator
@@ -22,6 +21,7 @@
 #include "share/ob_errno.h"                             // OB_NO_SUCH_FILE_OR_DIRECTORY
 #include "log_writer_utils.h"                           // LogWriteBuf
 #include "lsn.h"                                        // LSN
+#include "log_io_uitls.h"                               // openat_with_retry
 
 namespace oceanbase
 {
@@ -65,7 +65,7 @@ int LogBlockMgr::init(const char *log_dir,
     PALF_LOG(ERROR, "::open failed", K(ret), K(log_dir));
   } else if (OB_FAIL(curr_writable_handler_.init(dir_fd_, log_block_size, align_size, align_buf_size))) {
     PALF_LOG(ERROR, "init curr_writable_handler_ failed", K(ret), K(log_dir));
-  } else if (OB_FAIL(do_scan_dir_(log_dir, initial_block_id))) {
+  } else if (OB_FAIL(do_scan_dir_(log_dir, initial_block_id, log_block_pool))) {
     PALF_LOG(ERROR, "do_scan_dir_ failed", K(ret), K(log_dir));
   } else if (OB_FAIL(try_recovery_last_block_(log_dir))) {
     PALF_LOG(ERROR, "try_recovery_last_block_ failed", K(ret), KPC(this));
@@ -101,7 +101,10 @@ void LogBlockMgr::destroy()
   is_inited_ = false;
   align_size_ = -1;
   align_buf_size_ = -1;
-  dir_fd_ = -1;
+  if (-1 != dir_fd_) {
+    close_with_ret(dir_fd_);
+    dir_fd_ = -1;
+  }
   log_block_pool_ = NULL;
   curr_writable_handler_.destroy();
   curr_writable_block_id_ = LOG_INVALID_BLOCK_ID;
@@ -345,19 +348,74 @@ int LogBlockMgr::do_truncate_(const block_id_t block_id,
 		ret = OB_ERR_UNEXPECTED;
 		PALF_LOG(ERROR, "unexpected error, block id is not same sa curr_writable_block_id_", K(ret),
 				KPC(this), K(block_id));
-	} else if (OB_FAIL(block_id_to_string(block_id, block_path, OB_MAX_FILE_NAME_LENGTH))
-             && OB_FAIL(curr_writable_handler_.close()
-             && OB_FAIL(curr_writable_handler_.open(block_path)))) {
+	} else if (OB_FAIL(block_id_to_string(block_id, block_path, OB_MAX_FILE_NAME_LENGTH))) {
+    PALF_LOG(ERROR, "block_id_to_string failed", K(ret), K(block_id), KPC(this));
+  } else if (OB_FAIL(curr_writable_handler_.close())) {
+    PALF_LOG(ERROR, "close curr_writable_handler_ failed", K(ret), K(block_id), KPC(this));
+  } else if (OB_FAIL(curr_writable_handler_.open(block_path))) {
     PALF_LOG(ERROR, "open block after delete_block_from_back_to_front_until_ failed",
         K(ret), K(block_id), KPC(this));
   } else if (OB_FAIL(curr_writable_handler_.truncate(offset))) {
     PALF_LOG(WARN, "truncate curr_writable_handler_ failed", K(ret), K(block_id), K(offset));
+  } else if (OB_FAIL(check_after_truncate_(block_path, offset))) {
+    PALF_LOG(ERROR, "check_after_truncate_ failed", K(ret), K(block_id), K(offset));
   } else if (OB_FAIL(curr_writable_handler_.load_data(offset))) {
     PALF_LOG(WARN, "load_data failed", K(ret), K(block_id), K(offset));
   } else {
     PALF_LOG(INFO, "do_truncate_ success", K(ret), K(block_id), K(offset), K(min_block_id_), K(max_block_id_));
   }
 
+  return ret;
+}
+
+int LogBlockMgr::check_after_truncate_(const char *block_path, const offset_t offset)
+{
+  int ret = OB_SUCCESS;
+  int fd = -1;
+  char *buf = NULL;
+  const int buf_len = 8*1024;
+  char *expected_data = NULL;
+  offset_t read_offset = lower_align(offset, LOG_DIO_ALIGN_SIZE);
+  const int backoff = offset - read_offset;
+  // The min length of PADDING is 4K, therefore, read_offset may be 64MB-4KB,
+  // in_read_size is 4K, otherwise, in_read_size is 8K.
+  const int in_read_size = MIN(buf_len, log_block_size_-read_offset);
+  OB_ASSERT(backoff < LOG_DIO_ALIGN_SIZE);
+  if (OB_FAIL(openat_with_retry(dir_fd_, block_path, LOG_READ_FLAG, FILE_OPEN_MODE, fd))) {
+    PALF_LOG(ERROR, "openat_with_retry failed", KPC(this), K(block_path));
+  } else if (NULL == (expected_data = \
+      reinterpret_cast<char*>(ob_malloc(buf_len, "LogBlockMgr")))) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+    PALF_LOG(ERROR, "malloc failed", KPC(this));
+  } else if (FALSE_IT(memset(expected_data, 0, buf_len))) {
+  } else if (NULL == (buf = \
+      reinterpret_cast<char*>(ob_malloc_align(LOG_DIO_ALIGN_SIZE, buf_len, "LogBlockMgr")))) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+    PALF_LOG(ERROR, "malloc failed", KPC(this));
+  } else if (in_read_size!= (ob_pread(fd, buf, in_read_size, read_offset))) {
+    ret = convert_sys_errno();
+    PALF_LOG(ERROR, "ob_pread failed", KPC(this), K(fd), K(offset));
+    // TODO by runlin: after support reuse block, need use another method.
+  } else if (0 != MEMCMP(buf+backoff, expected_data, in_read_size-backoff)) {
+    ret = OB_ERR_UNEXPECTED;
+    while (OB_FAIL(ret)) {
+      PALF_LOG(ERROR, "after truncate, data is not zero", KPC(this), K(fd), K(offset),
+          KP(buf), KP(expected_data), K(in_read_size), K(backoff));
+      usleep(1000*1000);
+    }
+  } else {
+    PALF_LOG(INFO, "check_after_truncate_ success", KPC(this), K(block_path), K(offset));
+  }
+
+  if (-1 != fd && OB_FAIL(close_with_ret(fd))) {
+    PALF_LOG(ERROR, "close_with_ret failed", KPC(this), K(block_path));
+  }
+  if (NULL != buf) {
+    ob_free_align(buf);
+  }
+  if (NULL != expected_data) {
+    ob_free(expected_data);
+  }
   return ret;
 }
 
@@ -400,14 +458,16 @@ int LogBlockMgr::do_delete_block_(const block_id_t block_id)
   return ret;
 }
 
-int LogBlockMgr::do_scan_dir_(const char *dir, const block_id_t initial_block_id)
+int LogBlockMgr::do_scan_dir_(const char *dir,
+                              const block_id_t initial_block_id,
+                              ILogBlockPool *log_block_pool)
 {
   int ret = OB_SUCCESS;
   if (LOG_INVALID_BLOCK_ID != min_block_id_ || LOG_INVALID_BLOCK_ID != max_block_id_) {
     ret = OB_ERR_UNEXPECTED;
     PALF_LOG(WARN, "unexpected error, the cache data must be invalid", K(ret), K(min_block_id_), K(max_block_id_));
   } else {
-    TrimLogDirectoryFunctor functor(dir);
+    TrimLogDirectoryFunctor functor(dir, log_block_pool);
     if (OB_FAIL(scan_dir(dir, functor))) {
       PALF_LOG(WARN, "scan_dir failed", K(ret), K(dir));
     } else {

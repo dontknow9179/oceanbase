@@ -207,7 +207,7 @@ int PalfEnvImpl::init(
     PALF_LOG(ERROR, "construct log path failed", K(ret), K(pret));
   } else if (OB_FAIL(palf_handle_impl_map_.init("LOG_HASH_MAP", tenant_id))) {
     PALF_LOG(ERROR, "palf_handle_impl_map_ init failed", K(ret));
-  } else if (OB_FAIL(log_loop_thread_.init(this))) {
+  } else if (OB_FAIL(log_loop_thread_.init(true, this))) {
     PALF_LOG(ERROR, "log_loop_thread_ init failed", K(ret));
   } else if (OB_FAIL(
                  election_timer_.init_and_start(1, 1_ms, "ElectTimer"))) { // just one worker thread
@@ -504,6 +504,10 @@ int PalfEnvImpl::create_directory(const char *base_dir)
     PALF_LOG(ERROR, "fsync_dir failed", K(ret), K(errno), K(tmp_base_dir), K(base_dir));
   } else {
     PALF_LOG(INFO, "prepare_directory_for_creating_ls success", K(ret), K(base_dir));
+  }
+  if (OB_FAIL(ret)) {
+    FileDirectoryUtils::delete_directory_rec(tmp_base_dir);
+    FileDirectoryUtils::delete_directory_rec(base_dir);
   }
   return ret;
 }

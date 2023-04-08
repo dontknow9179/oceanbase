@@ -6,7 +6,7 @@
  * ob_das_spatial_index_lookup_op.cpp is for …
  *
  * Authors:
- *     shengle<xiaoyi.xy@alibaba-inc.com>
+ *     shengle<>
  */
 #define USING_LOG_PREFIX SQL_DAS
 #include "sql/das/ob_das_spatial_index_lookup_op.h"
@@ -57,10 +57,16 @@ int ObSpatialIndexLookupOp::init(const ObDASScanCtDef *lookup_ctdef,
   return ret;
 }
 
-int ObSpatialIndexLookupOp::reset_lookup_state(bool need_switch_param)
+ObSpatialIndexLookupOp::~ObSpatialIndexLookupOp()
+{
+  sorter_.clean_up();
+  sorter_.~ObExternalSort();
+}
+
+int ObSpatialIndexLookupOp::reset_lookup_state()
 {
   is_inited_ = false;
-  return ObLocalIndexLookupOp::reset_lookup_state(need_switch_param);
+  return ObLocalIndexLookupOp::reset_lookup_state();
 }
 
 int ObSpatialIndexLookupOp::filter_by_mbr(const ObObj &mbr_obj, bool &pass_through)
@@ -203,7 +209,7 @@ int ObSpatialIndexLookupOp::get_next_row()
             ret = OB_SUCCESS;
             if (need_next_index_batch()) {
               // reuse lookup_iter_ only
-              ObLocalIndexLookupOp::reset_lookup_state(false);
+              ObLocalIndexLookupOp::reset_lookup_state();
               index_end_ = false;
               state_ = INDEX_SCAN;
             } else {

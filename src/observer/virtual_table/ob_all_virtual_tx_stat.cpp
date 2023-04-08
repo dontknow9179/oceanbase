@@ -59,12 +59,16 @@ int ObGVTxStat::prepare_start_to_read_()
   } else if (OB_SUCCESS != (ret = fill_tenant_ids_())) {
     SERVER_LOG(WARN, "fail to fill tenant ids", K(ret));
   } else {
-    for (int i = 0; i < all_tenants_.count(); i++) {
+    for (int i = 0; i < all_tenants_.count() && OB_SUCC(ret); i++) {
       int64_t cur_tenant_id = all_tenants_.at(i);
       MTL_SWITCH(cur_tenant_id) {
         transaction::ObTransService *txs = MTL(transaction::ObTransService*);
         if (OB_SUCCESS != (ret = txs->iterate_all_observer_tx_stat(tx_stat_iter_))) {
           SERVER_LOG(WARN, "iterate transaction stat error", K(ret), K(cur_tenant_id));
+          // when interate tenant failed, show all info collected, not need return error code
+          if (OB_NOT_RUNNING == ret || OB_NOT_INIT == ret) {
+            ret = OB_SUCCESS;
+          }
         }
       }
     }
@@ -204,13 +208,15 @@ int ObGVTxStat::inner_get_next_row(ObNewRow *&row)
             cur_row_.cells_[i].set_timestamp(tx_stat.tx_ctx_create_time_);
           } else {
             // if invalid timestamp, display NULL
+            cur_row_.cells_[i].reset();
           }
           break;
         case TX_EXPIRED_TIME:
           if (is_valid_timestamp_(tx_stat.tx_expired_time_)) {
             cur_row_.cells_[i].set_timestamp(tx_stat.tx_expired_time_);
           } else {
-            // if invalid timestmap, display NULL
+            // if invalid timestamp, display NULL
+            cur_row_.cells_[i].reset();
           }
           break;
         case REF_CNT:

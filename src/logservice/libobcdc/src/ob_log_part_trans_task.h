@@ -739,7 +739,7 @@ public:
     TASK_TYPE_UNKNOWN = 0,
     TASK_TYPE_DML_TRANS,          // DML trans
     TASK_TYPE_DDL_TRANS,          // DDL trans
-    TASK_TYPE_LS_TABLE,           // LS_TABLE_OP trans
+    TASK_TYPE_LS_OP_TRANS,        // Log stream operations trans
     TASK_TYPE_LS_HEARTBEAT,       // heartbeat of LS level, used to push ls dispatch progress, to push ls dispatch progress
     TASK_TYPE_GLOBAL_HEARTBEAT,   // heartbeat of global level, used to pass checkpoint info for downstream
     TASK_TYPE_OFFLINE_LS,         // LS offline task
@@ -831,7 +831,8 @@ public:
       const transaction::TransType &trans_type,
       const transaction::ObLSLogInfoArray &ls_info_array,
       const palf::LSN &commit_log_lsn,
-      const int64_t commit_log_submit_ts);
+      const int64_t commit_log_submit_ts,
+      const bool is_data_dict_mode);
 
   /// try to set PartTransTask in DataReady
   /// PartTransDispatcher dispatch commit part trans
@@ -911,7 +912,7 @@ public:
   bool is_sys_ls_part_trans() const { return tls_id_.is_sys_log_stream(); }
   bool is_dml_trans() const { return TASK_TYPE_DML_TRANS == type_; }
   bool is_ddl_trans() const { return TASK_TYPE_DDL_TRANS == type_; }
-  bool is_ls_table_trans() const { return TASK_TYPE_LS_TABLE == type_; }
+  bool is_ls_op_trans() const { return TASK_TYPE_LS_OP_TRANS == type_; }
   bool is_offline_ls_task() const { return TASK_TYPE_OFFLINE_LS == type_; }
   // Is it a DDL OFFLINE task
   bool is_sys_ls_offline_task() const
@@ -919,6 +920,7 @@ public:
     return is_offline_ls_task() && is_sys_ls_part_trans();
   }
   bool is_not_served_trans() const { return TASK_TYPE_NOT_SERVED_TRANS == type_; }
+  bool is_sys_ls_dml_trans() const { return is_dml_trans() && is_sys_ls_part_trans(); }
 
   void set_task_info(const TenantLSID &tls_id, const char *info);
 
@@ -1030,7 +1032,6 @@ public:
   bool is_served() const { return SERVED == serve_state_; }
   bool is_single_ls_trans() const { return transaction::TransType::SP_TRANS == trans_type_; }
   bool is_dist_trans() const { return transaction::TransType::DIST_TRANS == trans_type_; }
-  void is_part_trans_sort_finish() const { sorted_redo_list_.is_dml_stmt_iter_end(); }
   bool is_part_dispatch_finish() const { return sorted_redo_list_.is_dispatch_finish(); }
   void inc_sorted_br() { ATOMIC_INC(&output_br_count_by_turn_); }
   // get and reset sorted br count

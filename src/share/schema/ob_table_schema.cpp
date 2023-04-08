@@ -146,6 +146,7 @@ int ObSimpleTableSchemaV2::assign(const ObSimpleTableSchemaV2 &other)
       in_offline_ddl_white_list_ = other.in_offline_ddl_white_list_;
       object_status_ = other.object_status_;
       is_force_view_ = other.is_force_view_;
+      truncate_version_ = other.truncate_version_;
       if (OB_FAIL(table_mode_.assign(other.table_mode_))) {
         LOG_WARN("Fail to assign table mode", K(ret), K(other.table_mode_));
       } else if (OB_FAIL(deep_copy_str(other.table_name_, table_name_))) {
@@ -206,7 +207,8 @@ bool ObSimpleTableSchemaV2::operator ==(const ObSimpleTableSchemaV2 &other) cons
      link_table_id_ == other.link_table_id_ &&
      link_schema_version_ == other.link_schema_version_ &&
      link_database_name_ == other.link_database_name_ &&
-     object_status_ == other.object_status_) {
+     object_status_ == other.object_status_ &&
+     truncate_version_ == other.truncate_version_) {
      ret = true;
      if (true == ret) {
        if (simple_foreign_key_info_array_.count() == other.simple_foreign_key_info_array_.count()) {
@@ -280,6 +282,7 @@ void ObSimpleTableSchemaV2::reset()
   tablespace_id_ = OB_INVALID_ID;
   encrypt_key_.reset();
   master_key_id_ = OB_INVALID_ID;
+  truncate_version_ = OB_INVALID_VERSION;
   ObPartitionSchema::reset();
 }
 
@@ -787,7 +790,8 @@ int64_t ObSimpleTableSchemaV2::to_string(char *buf, const int64_t buf_len) const
     K(get_tablet_id()),
     K_(max_dependency_version),
     K_(object_status),
-    K_(is_force_view)
+    K_(is_force_view),
+    K_(truncate_version)
 );
   J_OBJ_END();
 
@@ -4004,6 +4008,7 @@ int ObTableSchema::check_prohibition_rules(const ObColumnSchemaV2 &src_schema,
   int ret = OB_SUCCESS;
   bool is_enable = false;
   bool is_same = false;
+  bool has_prefix_idx_col_deps = false;
   bool is_column_in_fk = is_column_in_foreign_key(src_schema.get_column_id());
   if (OB_FAIL(check_is_exactly_same_type(src_schema, dst_schema, is_same))) {
     LOG_WARN("failed to check is exactly same type", K(ret));
@@ -4028,6 +4033,12 @@ int ObTableSchema::check_prohibition_rules(const ObColumnSchemaV2 &src_schema,
   // It is forbidden to modify the type when the modified column is referenced by the generated column
     ret = OB_NOT_SUPPORTED;
     LOG_USER_ERROR(OB_NOT_SUPPORTED, "Alter column that the generated column depends on");
+  } else if (!is_oracle_mode && is_offline
+    && OB_FAIL(check_prefix_index_columns_depend(src_schema, schema_guard, has_prefix_idx_col_deps))) {
+    LOG_WARN("check prefix index columns cascaded failed", K(ret));
+  } else if (has_prefix_idx_col_deps) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "Alter column that the prefix index column depends on");
   } else if ((src_schema.is_string_type() || src_schema.is_enum_or_set())
             && (src_schema.get_collation_type() != dst_schema.get_collation_type()
             || src_schema.get_charset_type() != dst_schema.get_charset_type())
@@ -5224,6 +5235,62 @@ bool ObTableSchema::has_generated_and_partkey_column() const
   }
   return result;
 }
+
+int ObTableSchema::check_prefix_index_columns_depend(
+    const ObColumnSchemaV2 &data_column_schema,
+    ObSchemaGetterGuard &schema_guard,
+    bool &has_prefix_idx_col_deps) const
+{
+  int ret = OB_SUCCESS;
+  has_prefix_idx_col_deps = false;
+  ObHashSet<ObString> deps_gen_columns; // generated columns depend on the data column.
+  ObSEArray<ObAuxTableMetaInfo, 16> simple_index_infos;
+  if (!data_column_schema.has_generated_column_deps()) {
+  } else if (OB_FAIL(deps_gen_columns.create(OB_MAX_COLUMN_NUMBER/2))) {
+    LOG_WARN("create hashset failed", K(ret));
+  } else if (OB_FAIL(get_simple_index_infos(simple_index_infos))) {
+    LOG_WARN("get simple index infos failed", K(ret));
+  } else {
+    const uint64_t tenant_id = get_tenant_id();
+    for (ObTableSchema::const_column_iterator iter = column_begin();
+        OB_SUCC(ret) && iter != column_end(); iter++) {
+      const ObColumnSchemaV2 *column = *iter;
+      if (OB_ISNULL(column)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected err", K(ret), KPC(this));
+      } else if (column->is_prefix_column()) {
+        // prefix index columns are hidden generated column in data table.
+        if (column->has_cascaded_column_id(data_column_schema.get_column_id())
+          && OB_FAIL(deps_gen_columns.set_refactored(column->get_column_name()))) {
+          LOG_WARN("set refactored failed", K(ret));
+        }
+      } else {/* do nothing. */}
+    }
+
+    for (int64_t i = 0; OB_SUCC(ret) && !has_prefix_idx_col_deps && i < simple_index_infos.count(); i++) {
+      const ObTableSchema *index_schema = nullptr;
+      if (OB_FAIL(schema_guard.get_table_schema(tenant_id, simple_index_infos.at(i).table_id_, index_schema))) {
+        LOG_WARN("get table schema failed", K(ret), K(tenant_id), "table_id", simple_index_infos.at(i).table_id_);
+      } else if (OB_ISNULL(index_schema)) {
+        ret = OB_TABLE_NOT_EXIST;
+        LOG_WARN("index table not exist", K(ret), K(tenant_id), "table_id", simple_index_infos.at(i).table_id_);
+      } else {
+        const ObIndexInfo &index_info = index_schema->get_index_info();
+        for (int j = 0; OB_SUCC(ret) && !has_prefix_idx_col_deps && j < index_info.get_size(); j++) {
+          const ObColumnSchemaV2 *index_col = nullptr;
+          if (OB_ISNULL(index_col = index_schema->get_column_schema(index_info.get_column(j)->column_id_))) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("unexpected err", K(ret), "column_id", index_info.get_column(j)->column_id_);
+          } else if (OB_HASH_EXIST == deps_gen_columns.exist_refactored(index_col->get_column_name())) {
+            has_prefix_idx_col_deps = true;
+          } else { /* do nothing. */}
+        }
+      }
+    }
+  }
+  return ret;
+}
+
 // Because there are too many places to call this function, you must be careful when modifying this function,
 // and it is recommended not to modify
 // If you must modify this function, pay attention to whether the location of calling this function also depends on the error code
@@ -5653,7 +5720,7 @@ OB_DEF_SERIALIZE(ObTableSchema)
                 rls_group_ids_,
                 rls_context_ids_);
   }
-  LST_DO_CODE(OB_UNIS_ENCODE, object_status_, is_force_view_);
+  LST_DO_CODE(OB_UNIS_ENCODE, object_status_, is_force_view_, truncate_version_);
   }();
   return ret;
 }
@@ -5990,7 +6057,7 @@ OB_DEF_DESERIALIZE(ObTableSchema)
                 rls_policy_ids_,
                 rls_group_ids_,
                 rls_context_ids_);
-    LST_DO_CODE(OB_UNIS_DECODE, object_status_, is_force_view_);
+    LST_DO_CODE(OB_UNIS_DECODE, object_status_, is_force_view_, truncate_version_);
   }
   }();
   return ret;
@@ -6124,6 +6191,7 @@ OB_DEF_SERIALIZE_SIZE(ObTableSchema)
               rls_context_ids_);
   OB_UNIS_ADD_LEN(object_status_);
   OB_UNIS_ADD_LEN(is_force_view_);
+  OB_UNIS_ADD_LEN(truncate_version_);
   return len;
 }
 

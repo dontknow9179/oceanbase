@@ -180,18 +180,30 @@ int ObITransCallback::remove()
 }
 
 ObTransCallbackMgr::WRLockGuard::WRLockGuard(const SpinRWLock &rwlock)
+#ifdef ENABLE_DEBUG_LOG
   : time_guard_(5 * 1000 * 1000), // 5 second
     lock_guard_(rwlock)
 {
   time_guard_.click();
 }
+#else
+  : lock_guard_(rwlock)
+{
+}
+#endif
 
 ObTransCallbackMgr::RDLockGuard::RDLockGuard(const SpinRWLock &rwlock)
+#ifdef ENABLE_DEBUG_LOG
   : time_guard_(5 * 1000 * 1000), // 5 second
     lock_guard_(rwlock)
 {
   time_guard_.click();
 }
+#else
+  : lock_guard_(rwlock)
+{
+}
+#endif
 
 void ObTransCallbackMgr::reset()
 {
@@ -211,7 +223,6 @@ void ObTransCallbackMgr::reset()
     callback_lists_ = NULL;
   }
   parallel_stat_ = 0;
-  leader_changed_ = false;
   callback_main_list_append_count_ = 0;
   callback_slave_list_append_count_ = 0;
   callback_slave_list_merge_count_ = 0;
@@ -433,6 +444,24 @@ int ObTransCallbackMgr::calc_checksum_before_scn(const SCN scn,
   return ret;
 }
 
+int ObTransCallbackMgr::sync_log_fail(const ObCallbackScope &callbacks,
+                                      int64_t &removed_cnt)
+{
+  int ret = OB_SUCCESS;
+  removed_cnt = 0;
+
+  // TODO(handora.qc): remove it in the future
+  RDLockGuard guard(rwlock_);
+
+  if (callbacks.is_empty()) {
+    // pass empty callbacks
+  } else if (OB_FAIL(callback_list_.sync_log_fail(callbacks, removed_cnt))) {
+    TRANS_LOG(ERROR, "sync log fail", K(ret));
+  }
+
+  return ret;
+}
+
 void ObTransCallbackMgr::update_checksum(const uint64_t checksum,
                                          const SCN checksum_scn)
 {
@@ -506,7 +535,7 @@ void ObTransCallbackMgr::acquire_callback_list()
       TRANS_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "Unexpected status", K(this), K(tid_), K(ref_cnt_), K(tid));
     }
   } else {
-    // https://yuque.antfin.com/ob/transaction/xzwarh
+    //
     ATOMIC_STORE(&parallel_stat_, PARALLEL_STMT);
   }
 }
@@ -519,7 +548,7 @@ void ObTransCallbackMgr::revert_callback_list()
   int64_t cnt = 0;
   if (0 == stat) {
     WRLockGuard guard(rwlock_);
-    // https://yuque.antfin.com/ob/transaction/xzwarh
+    //
     if (OB_NOT_NULL(callback_lists_)) {
       cnt = callback_list_.concat_callbacks(callback_lists_[slot]);
       add_slave_list_merge_cnt(cnt);

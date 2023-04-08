@@ -1,6 +1,6 @@
 // Copyright 2021 Alibaba Inc. All Rights Reserved.
 // Author:
-//     shanting <dachuan.sdc@antgroup.com>
+//     shanting <>
 
 #ifndef OCEANBASE_SQL_ENGINE_LINK_SCAN_OP_H_
 #define OCEANBASE_SQL_ENGINE_LINK_SCAN_OP_H_
@@ -43,6 +43,7 @@ public:
 private:
   virtual void reset_dblink() override;
   void reset_result();
+  bool need_tx(const ObSQLSessionInfo *my_session) const;
 private:
   common::ObMySQLProxy::MySQLResult res_;
   common::sqlclient::ObMySQLResult *result_;

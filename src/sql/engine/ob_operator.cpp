@@ -18,6 +18,7 @@
 #include "sql/engine/ob_exec_context.h"
 #include "common/ob_smart_call.h"
 #include "sql/monitor/ob_sql_plan_manager.h"
+#include "observer/ob_server.h"
 
 namespace oceanbase
 {
@@ -78,13 +79,22 @@ int ObDynamicParamSetter::update_dynamic_param(ObEvalCtx &eval_ctx, ObDatum &dat
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid argument", K(ret), KP(phy_ctx), KP(dst_));
   } else {
-    ParamStore &param_store = phy_ctx->get_param_store_for_update();
     clear_parent_evaluated_flag(eval_ctx, *dst_);
     ObDatum &param_datum = dst_->locate_expr_datum(eval_ctx);
-    param_datum.set_datum(datum);
     dst_->get_eval_info(eval_ctx).evaluated_ = true;
+    if (0 == dst_->res_buf_off_) {
+      // for compat, old server don't have ref buf for dynamic expr,
+      // so keep shallow copy
+      param_datum.set_datum(datum);
+    } else {
+      if (OB_FAIL(dst_->deep_copy_datum(eval_ctx, datum))) {
+        LOG_WARN("fail to deep copy datum", K(ret), K(eval_ctx), K(*dst_));
+      }
+    }
     //初始化param store, 用于query range计算
-    if (OB_UNLIKELY(param_idx_ < 0 || param_idx_ >= param_store.count())) {
+    ParamStore &param_store = phy_ctx->get_param_store_for_update();
+    if (OB_FAIL(ret)) {
+    } else if (OB_UNLIKELY(param_idx_ < 0 || param_idx_ >= param_store.count())) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("invalid index", K(ret), K(param_idx_), K(param_store.count()));
     } else if (OB_FAIL(param_datum.to_obj(param_store.at(param_idx_),
@@ -553,6 +563,49 @@ int ObOperator::check_stack_once()
   return ret;
 }
 
+int ObOperator::output_expr_sanity_check()
+{
+  int ret = OB_SUCCESS;
+  for (int64_t i = 0; OB_SUCC(ret) && i < spec_.output_.count(); ++i) {
+    ObDatum *datum = NULL;
+    const ObExpr *expr = spec_.output_[i];
+    if (OB_ISNULL(expr)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("error unexpected, expr is nullptr", K(ret));
+    } else if (OB_FAIL(expr->eval(eval_ctx_, datum))) {
+      LOG_WARN("evaluate expression failed", K(ret));
+    } else {
+      SANITY_CHECK_RANGE(datum->ptr_, datum->len_);
+    }
+  }
+  return ret;
+}
+
+int ObOperator::output_expr_sanity_check_batch()
+{
+  int ret = OB_SUCCESS;
+  for (int64_t i = 0; OB_SUCC(ret) && i < spec_.output_.count(); ++i) {
+    const ObExpr *expr = spec_.output_[i];
+    if (OB_ISNULL(expr)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("error unexpected, expr is nullptr", K(ret));
+    } else if (OB_FAIL(expr->eval_batch(eval_ctx_, *brs_.skip_, brs_.size_))) {
+      LOG_WARN("evaluate expression failed", K(ret));
+    } else if (!expr->is_batch_result()){
+      const ObDatum &datum = expr->locate_expr_datum(eval_ctx_);
+      SANITY_CHECK_RANGE(datum.ptr_, datum.len_);
+    } else {
+      const ObDatum *datums = expr->locate_batch_datums(eval_ctx_);
+      for (int64_t j = 0; j < brs_.size_; j++) {
+        if (!brs_.skip_->at(j)) {
+          SANITY_CHECK_RANGE(datums[j].ptr_, datums[j].len_);
+        }
+      }
+    }
+  }
+  return ret;
+}
+
 // copy from ob_phy_operator.cpp
 int ObOperator::open()
 {
@@ -876,7 +929,7 @@ int ObOperator::submit_op_monitor_node()
   if (GCONF.enable_sql_audit) {
     // Record monitor info in sql_plan_monitor
     // Some records that meets the conditions needs to be archived
-    // Reference document: https://yuque.antfin.com/baixian.zr/brtfzn/ppx26a
+    // Reference document:
     op_monitor_info_.close_time_ = oceanbase::common::ObClockGenerator::getClock();
     ObPlanMonitorNodeList *list = MTL(ObPlanMonitorNodeList*);
     if (list && spec_.plan_) {
@@ -894,23 +947,26 @@ int ObOperator::submit_op_monitor_node()
           }
         }
         // exclude io time cost
-        op_monitor_info_.db_time_ = db_time;
+        uint64_t cpu_khz = OBSERVER.get_cpu_frequency_khz();
+        op_monitor_info_.db_time_ = 1000 * db_time / cpu_khz;
+        op_monitor_info_.block_time_ = 1000 * op_monitor_info_.block_time_ / cpu_khz;
+
         IGNORE_RETURN list->submit_node(op_monitor_info_);
         LOG_DEBUG("debug monitor", K(spec_.id_));
       }
     }
-    ObSqlPlanMgr *sql_plan_mgr = MTL(ObSqlPlanMgr*);
-    ObPlanRealInfoMgr *plan_info = NULL;
-    if (NULL != sql_plan_mgr) {
-      plan_info = sql_plan_mgr->get_plan_real_info_mgr();
-    }
-    if (plan_info && spec_.plan_ && spec_.plan_->need_record_plan_info()) {
-      IGNORE_RETURN plan_info->handle_plan_info(spec_.id_,
-                                                spec_.plan_->get_sql_id_string(),
-                                                spec_.plan_->get_plan_id(),
-                                                spec_.plan_->get_plan_hash_value(),
-                                                op_monitor_info_);
-    }
+    // ObSqlPlanMgr *sql_plan_mgr = MTL(ObSqlPlanMgr*);
+    // ObPlanRealInfoMgr *plan_info = NULL;
+    // if (NULL != sql_plan_mgr) {
+    //   plan_info = sql_plan_mgr->get_plan_real_info_mgr();
+    // }
+    // if (plan_info && spec_.plan_ && spec_.plan_->need_record_plan_info()) {
+    //   IGNORE_RETURN plan_info->handle_plan_info(spec_.id_,
+    //                                             spec_.plan_->get_sql_id_string(),
+    //                                             spec_.plan_->get_plan_id(),
+    //                                             spec_.plan_->get_plan_hash_value(),
+    //                                             op_monitor_info_);
+    // }
   }
   IGNORE_RETURN try_deregister_rt_monitor_node();
   return ret;
@@ -958,8 +1014,8 @@ int ObOperator::get_next_row()
               "op_id", spec_.id_);
           }
         } else {
+          bool filtered = false;
           if (!spec_.filters_.empty()) {
-            bool filtered = false;
             if (OB_FAIL(filter_row(filtered))) {
               LOG_WARN("filter row failed", K(ret), "type", spec_.type_, "op", op_name());
             } else {
@@ -968,6 +1024,13 @@ int ObOperator::get_next_row()
               }
             }
           }
+#ifdef ENABLE_SANITY
+          if (OB_SUCC(ret) && !filtered) {
+            if (OB_FAIL(output_expr_sanity_check())) {
+              LOG_WARN("output expr sanity check failed", K(ret));
+            }
+          }
+#endif
         }
         break;
       }
@@ -1067,11 +1130,11 @@ int ObOperator::get_next_batch(const int64_t max_row_cnt, const ObBatchRows *&ba
         if (OB_SUCC(ret) && (ctx_.get_my_session()->is_user_session() || spec_.plan_->get_phy_plan_hint().monitor_)) {
           IGNORE_RETURN try_register_rt_monitor_node(brs_.size_);
         }
+        bool all_filtered = false;
         if (OB_FAIL(ret)) {
         } else if (OB_FAIL(try_check_status_by_rows(brs_.size_))) {
           LOG_WARN("check status failed", K(ret));
         } else if (!spec_.filters_.empty()) {
-          bool all_filtered = false;
           if (OB_FAIL(filter_batch_rows(spec_.filters_,
                                         *brs_.skip_,
                                         brs_.size_,
@@ -1084,6 +1147,13 @@ int ObOperator::get_next_batch(const int64_t max_row_cnt, const ObBatchRows *&ba
             continue;
           }
         }
+#ifdef ENABLE_SANITY
+        if (OB_SUCC(ret) && !all_filtered) {
+          if (OB_FAIL(output_expr_sanity_check_batch())) {
+            LOG_WARN("output expr sanity check batch failed", K(ret));
+          }
+        }
+#endif
         break;
       }
 
@@ -1104,6 +1174,7 @@ int ObOperator::get_next_batch(const int64_t max_row_cnt, const ObBatchRows *&ba
           // if no data in batch, end iterate immediately, otherwise wait for next iterate
           brs_.end_ = !brs_.size_;
         }
+        skipped_rows_count = brs_.skip_->accumulate_bit_cnt(brs_.size_);
         op_monitor_info_.output_row_count_ += brs_.size_ - skipped_rows_count;
         op_monitor_info_.skipped_rows_count_ += skipped_rows_count; // for batch
         ++op_monitor_info_.output_batches_; // for batch

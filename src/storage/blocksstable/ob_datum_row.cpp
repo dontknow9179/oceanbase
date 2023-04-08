@@ -275,10 +275,11 @@ int ObDatumRow::reserve(const int64_t capacity, const bool keep_data)
     // skip
   } else if (OB_FAIL(datum_buffer_.reserve(capacity))) {
     STORAGE_LOG(WARN, "Failed to reserve datum buffer", K(ret), K(capacity));
+  } else if (OB_FAIL(obj_buf_.reserve(capacity))) {
+    STORAGE_LOG(WARN, "Failed to reserve obj buf", K(ret), K(capacity));
   } else {
     storage_datums_ = datum_buffer_.get_datums();
     old_row_.reset();
-    obj_buf_.reset();
   }
   if (OB_SUCC(ret)) {
     mvcc_row_flag_.reset();
@@ -608,7 +609,7 @@ int ObStorageDatumUtils::init(const ObIArray<share::schema::ObColDesc> &col_desc
   if (IS_INIT) {
     ret = OB_INIT_TWICE;
     STORAGE_LOG(WARN, "ObStorageDatumUtils init twice", K(ret), K(*this));
-  } else if (OB_UNLIKELY(schema_rowkey_cnt < 0 || schema_rowkey_cnt >= OB_MAX_ROWKEY_COLUMN_NUMBER
+  } else if (OB_UNLIKELY(schema_rowkey_cnt < 0 || schema_rowkey_cnt > OB_MAX_ROWKEY_COLUMN_NUMBER
                   || schema_rowkey_cnt > col_descs.count())) {
     ret = OB_INVALID_ARGUMENT;
     STORAGE_LOG(WARN, "Invalid argument to init storage datum utils", K(ret), K(col_descs), K(schema_rowkey_cnt));
@@ -624,7 +625,7 @@ int ObStorageDatumUtils::init(const ObIArray<share::schema::ObColDesc> &col_desc
       STORAGE_LOG(WARN, "Failed to reserve hash func array", K(ret));
     } else {
       // support column order index until next task done
-      // https://aone.alibaba-inc.com/task/39441116
+      //
       // we could use the cmp funcs in the basic funcs directlly
       bool is_null_last = is_oracle_mode_;
       ObCmpFunc cmp_func;

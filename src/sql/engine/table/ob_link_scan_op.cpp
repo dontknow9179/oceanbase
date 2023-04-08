@@ -85,6 +85,7 @@ int ObLinkScanOp::inner_execute_link_stmt(const char *link_stmt)
   my_session = ctx_.get_my_session();
   transaction::ObTransID tx_id;
   bool have_lob = false;
+  res_.set_enable_use_result(true);
   if (OB_ISNULL(link_stmt)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("unexpected NULL", K(ret), KP(link_stmt));
@@ -220,7 +221,7 @@ int ObLinkScanOp::inner_open()
   if (OB_FAIL(ret)) {
     // do nothing
   } else if (sql::DblinkGetConnType::DBLINK_POOL == conn_type_ &&
-             OB_FAIL(init_dblink(MY_SPEC.dblink_id_, GCTX.dblink_proxy_))) {
+             OB_FAIL(init_dblink(MY_SPEC.dblink_id_, GCTX.dblink_proxy_, MY_SPEC.has_for_update_))) {
     LOG_WARN("failed to init dblink", K(ret), K(MY_SPEC.dblink_id_), K(MY_SPEC.is_reverse_link_));
   } else if (OB_FAIL(init_tz_info(TZ_INFO(session)))) {
     LOG_WARN("failed to tz info", K(ret), KP(session));
@@ -406,6 +407,20 @@ int ObLinkScanOp::inner_get_next_batch(const int64_t max_row_cnt)
     }
   }
   return ret;
+}
+
+// PLEASE check the input parameter in public interface
+bool ObLinkScanOp::need_tx(const ObSQLSessionInfo *my_session) const
+{
+  bool ret_bool = false;
+  if (MY_SPEC.has_for_update_) {
+    // case 1, if select for update, tm_rm_start is required to be called.
+    ret_bool = true;
+  } else if (my_session->is_in_transaction()) {
+    // case 2, if select in transaction, tm_rm_start is required to be called.
+    ret_bool = true;
+  }
+  return ret_bool;
 }
 
 } // end namespace sql

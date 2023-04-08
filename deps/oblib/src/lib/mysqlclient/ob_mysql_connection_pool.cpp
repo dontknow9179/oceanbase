@@ -260,6 +260,7 @@ void ObMySQLConnectionPool::mark_all_server_connection_gone()
       ret = OB_ERR_UNEXPECTED;
       LOG_ERROR("unexpected error, pool is null", K(ret));
     } else {
+      pool->reset_idle_conn_to_sys_tenant();
       pool->set_server_gone(true);
     }
   }
@@ -520,7 +521,7 @@ int ObMySQLConnectionPool::try_connect(ObMySQLConnection *connection)
       //}
     }
     if (OB_SUCC(ret) && ObMySQLConnection::OCEANBASE_MODE == mode_) {
-      // bugfix: https://work.aone.alibaba-inc.com/issue/25943661
+      // bugfix:
       if (OB_FAIL(connection->init_oceanbase_connection())) {
         LOG_WARN("fail to init oceanabse connection", K(ret));
       }
@@ -810,7 +811,8 @@ int ObMySQLConnectionPool::acquire_dblink(uint64_t dblink_id, const dblink_param
 int ObMySQLConnectionPool::release_dblink(ObISQLConnection *dblink_conn, uint32_t sessid)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(release(dynamic_cast<ObMySQLConnection *>(dblink_conn), true, sessid))) {
+  const bool succ = OB_NOT_NULL(dblink_conn) ? dblink_conn->usable() : false;
+  if (OB_FAIL(release(dynamic_cast<ObMySQLConnection *>(dblink_conn), succ, sessid))) {
     LOG_WARN("fail to release dblink conn", K(ret));
   }
   return ret;
@@ -878,6 +880,7 @@ int ObMySQLConnectionPool::try_connect_dblink(ObISQLConnection *dblink_conn, int
     } else if (OB_FAIL(dblink_conn1->set_timeout_variable(config_.long_query_timeout_,
                                                          DEFAULT_TRANSACTION_TIMEOUT_US))) {
       LOG_WARN("fail to set mysql timeout variablse", K(ret));
+      dblink_conn1->close();
     }
   }
   return ret;

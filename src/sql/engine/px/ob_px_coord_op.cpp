@@ -132,7 +132,8 @@ ObPxCoordOp::ObPxCoordOp(ObExecContext &exec_ctx, const ObOpSpec &spec, ObOpInpu
   px_dop_(1),
   time_recorder_(0),
   batch_rescan_param_version_(0),
-  server_alive_checker_(coord_info_.dfo_mgr_, exec_ctx.get_my_session()->get_process_query_time())
+  server_alive_checker_(coord_info_.dfo_mgr_, exec_ctx.get_my_session()->get_process_query_time()),
+  last_px_batch_rescan_size_(0)
 {}
 
 
@@ -342,6 +343,9 @@ int ObPxCoordOp::inner_open()
   int ret = OB_SUCCESS;
   ObDfo *root_dfo = NULL;
   if (OB_FAIL(ObPxReceiveOp::inner_open())) {
+  } else if (GCTX.server_id_ <= 0) {
+    ret = OB_SERVER_IS_INIT;
+    LOG_WARN("Server is initializing", K(ret), K(GCTX.server_id_));
   } else if (OB_FAIL(post_init_op_ctx())) {
     LOG_WARN("init operator context failed", K(ret));
   } else if (FALSE_IT(px_sequence_id_ = GCTX.sql_engine_->get_px_sequence_id())) {
@@ -439,7 +443,8 @@ int ObPxCoordOp::init_dfo_mgr(const ObDfoInterruptIdGen &dfo_id_gen, ObDfoMgr &d
                 get_spec(),
                 px_expected,
                 px_admited_worker_count,
-                dfo_id_gen))) {
+                dfo_id_gen,
+                coord_info_))) {
       LOG_WARN("fail init dfo mgr",
                K(px_expected),
                K(query_expected),
@@ -865,6 +870,7 @@ int ObPxCoordOp::receive_channel_root_dfo(
     msg_loop_.set_tenant_id(ctx.get_my_session()->get_effective_tenant_id());
     msg_loop_.set_interm_result(enable_px_batch_rescan());
     msg_loop_.set_process_query_time(ctx_.get_my_session()->get_process_query_time());
+    msg_loop_.set_query_timeout_ts(ctx_.get_physical_plan_ctx()->get_timeout_timestamp());
     // root dfo 的 receive channel sets 在本机使用，不需要通过  DTL 发送
     // 直接注册到 msg_loop 中收取数据即可
     int64_t cnt = task_channels_.count();
@@ -884,6 +890,7 @@ int ObPxCoordOp::receive_channel_root_dfo(
         if (enable_px_batch_rescan()) {
           ch->set_interm_result(true);
           ch->set_batch_id(get_batch_id());
+          last_px_batch_rescan_size_ = max(get_batch_id() + 1, get_rescan_param_count());
         }
       }
       LOG_TRACE("link qc-task channel and registered to qc msg loop. ready to receive task data msg",
@@ -936,6 +943,7 @@ int ObPxCoordOp::receive_channel_root_dfo(
     msg_loop_.set_tenant_id(ctx.get_my_session()->get_effective_tenant_id());
     msg_loop_.set_interm_result(enable_px_batch_rescan());
     msg_loop_.set_process_query_time(ctx_.get_my_session()->get_process_query_time());
+    msg_loop_.set_query_timeout_ts(ctx_.get_physical_plan_ctx()->get_timeout_timestamp());
     // root dfo 的 receive channel sets 在本机使用，不需要通过  DTL 发送
     // 直接注册到 msg_loop 中收取数据即可
     int64_t cnt = task_channels_.count();
@@ -955,6 +963,7 @@ int ObPxCoordOp::receive_channel_root_dfo(
         if (enable_px_batch_rescan()) {
           ch->set_interm_result(true);
           ch->set_batch_id(get_batch_id());
+          last_px_batch_rescan_size_ = max(get_batch_id() + 1, get_rescan_param_count());
         }
       }
       LOG_TRACE("link qc-task channel and registered to qc msg loop. ready to receive task data msg",
@@ -1043,12 +1052,13 @@ int ObPxCoordOp::erase_dtl_interm_result()
         LOG_WARN("fail get channel info", K(ret));
       } else {
         key.channel_id_ = ci.chid_;
-        for (int j = 0; j < max(get_batch_id() + 1, get_rescan_param_count()); ++j) {
+        for (int j = 0; j < last_px_batch_rescan_size_; ++j) {
           key.batch_id_ = j;
           if (OB_FAIL(ObDTLIntermResultManager::getInstance().erase_interm_result_info(key))) {
             LOG_TRACE("fail to release recieve internal result", K(ret));
           }
         }
+        last_px_batch_rescan_size_ = 0;
       }
     }
   }

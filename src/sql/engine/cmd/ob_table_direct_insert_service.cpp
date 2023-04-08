@@ -1,6 +1,6 @@
 // Copyright (c) 2022-present Oceanbase Inc. All Rights Reserved.
 // Author:
-//   yuya.yu <yuya.yu@oceanbase.com>
+//   yuya.yu <>
 
 #define USING_LOG_PREFIX SQL_ENG
 
@@ -10,6 +10,8 @@
 #include "observer/table_load/ob_table_load_store.h"
 #include "sql/engine/ob_exec_context.h"
 #include "sql/engine/ob_physical_plan.h"
+#include "sql/optimizer/ob_optimizer_context.h"
+#include "sql/resolver/dml/ob_insert_stmt.h"
 
 namespace oceanbase
 {
@@ -17,6 +19,36 @@ using namespace observer;
 
 namespace sql
 {
+// Direct-insert is enabled only when:
+// 1. _ob_enable_direct_load
+// 2. insert into select clause
+// 3. append hint + pdml
+// 4. auto_commit, not in a transaction
+int ObTableDirectInsertService::check_direct_insert(ObOptimizerContext &optimizer_ctx,
+                                                    const ObDMLStmt &stmt,
+                                                    bool &is_direct_insert)
+{
+  int ret = OB_SUCCESS;
+  bool auto_commit = false;
+  const ObSQLSessionInfo* session_info = optimizer_ctx.get_session_info();
+  is_direct_insert = false;
+  if (OB_ISNULL(session_info)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get unexpected null", KR(ret), KP(session_info));
+  } else if (OB_FAIL(session_info->get_autocommit(auto_commit))) {
+    LOG_WARN("failed to get auto commit", KR(ret));
+  } else if (GCONF._ob_enable_direct_load
+      && stmt::T_INSERT == stmt.get_stmt_type()
+      && static_cast<const ObInsertStmt &>(stmt).value_from_select()
+      && optimizer_ctx.get_global_hint().has_append()
+      && optimizer_ctx.use_pdml()
+      && auto_commit
+      && (!session_info->is_in_transaction())){
+    is_direct_insert = true;
+  }
+  return ret;
+}
+
 bool ObTableDirectInsertService::is_direct_insert(const ObPhysicalPlan &phy_plan)
 {
   return (phy_plan.get_enable_append() && (0 != phy_plan.get_append_table_id()));
@@ -37,8 +69,7 @@ int ObTableDirectInsertService::start_direct_insert(ObExecContext &ctx,
       LOG_WARN("failed to get auto commit", KR(ret));
     } else if (!auto_commit || session->is_in_transaction()) {
       ret = OB_NOT_SUPPORTED;
-      LOG_WARN("using direct-insert within a transaction is not supported",
-          KR(ret), K(auto_commit), K(session->is_in_transaction()));
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "using direct-insert within a transaction is");
     } else {
       ObTableDirectInsertCtx &table_direct_insert_ctx = ctx.get_table_direct_insert_ctx();
       uint64_t table_id = phy_plan.get_append_table_id();
@@ -79,7 +110,15 @@ int ObTableDirectInsertService::open_task(const uint64_t table_id, const int64_t
   ObTableLoadTableCtx *table_ctx = nullptr;
   ObTableLoadKey key(MTL_ID(), table_id);
   if (OB_FAIL(ObTableLoadService::get_ctx(key, table_ctx))) {
-    LOG_WARN("fail to get table ctx", KR(ret), K(key), K(table_id));
+    if (OB_UNLIKELY(OB_ENTRY_NOT_EXIST != ret)) {
+      LOG_WARN("fail to get table ctx", KR(ret), K(key));
+    } else {
+      ret = OB_NOT_MASTER;
+      LOG_WARN("not the master of store", KR(ret), K(key));
+    }
+  } else if (OB_UNLIKELY(nullptr == table_ctx->store_ctx_)) {
+    ret = OB_NOT_MASTER;
+    LOG_WARN("not the master of store", KR(ret), K(key));
   } else {
     table::ObTableLoadTransId trans_id;
     trans_id.segment_id_ = task_id;

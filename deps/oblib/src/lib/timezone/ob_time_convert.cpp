@@ -792,8 +792,7 @@ int ObTimeConverter::str_to_date(const ObString &str, int32_t &value,
   return ret;
 }
 
-int ObTimeConverter::str_to_time(const ObString &str, int64_t &value, int16_t *scale,
-                                 const ObScale &time_scale, const bool &need_truncate)
+int ObTimeConverter::str_to_time(const ObString &str, int64_t &value, int16_t *scale, const bool &need_truncate)
 {
   int ret = OB_SUCCESS;
   ObTime ob_time(DT_TYPE_TIME);
@@ -801,14 +800,14 @@ int ObTimeConverter::str_to_time(const ObString &str, int64_t &value, int16_t *s
     LOG_WARN("failed to convert string to time", K(ret), K(str));
     if (OB_ERR_TRUNCATED_WRONG_VALUE == ret) {
       value = ob_time_to_time(ob_time);
-      time_overflow_trunc(value, time_scale);
+      time_overflow_trunc(value);
       if (DT_MODE_NEG & ob_time.mode_) {
         value = -value;
       }
     }
   } else {
     value = ob_time_to_time(ob_time);
-    ret = time_overflow_trunc(value, time_scale);
+    ret = time_overflow_trunc(value);
     if (DT_MODE_NEG & ob_time.mode_) {
       value = -value;
     }
@@ -5363,7 +5362,7 @@ int ObTimeConverter::set_ob_time_part_may_conflict(ObTime &ob_time, int64_t &con
 }
 
 // DT_YEAR的赋值没有用上面的接口，原因是year的冲突检查具有特殊性。
-// 具体原因：https://code.aone.alibaba-inc.com/oceanbase/oceanbase/codereview/3826268
+// 具体原因：
 int ObTimeConverter::set_ob_time_year_may_conflict(ObTime &ob_time, int32_t &julian_year_value,
                                                   int32_t check_year, int32_t set_year,
                                                   bool overwrite)
@@ -5386,8 +5385,7 @@ int ObTimeConverter::set_ob_time_year_may_conflict(ObTime &ob_time, int32_t &jul
 int ObTimeConverter::time_overflow_trunc(int64_t &value, const ObScale &time_scale)
 {
   int ret = OB_SUCCESS;
-  int64_t increment = (6 == time_scale) ? 999999 : 0;
-  if (value > (TIME_MAX_VAL + increment)) {
+  if (value > TIME_MAX_VAL) {
     // we need some ob error codes that map to ER_TRUNCATED_WRONG_VALUE,
     // so we get OB_INVALID_DATE_FORMAT / OB_INVALID_DATE_VALUE / OB_ERR_TRUNCATED_WRONG_VALUE.
     // another requirement comes from cast function in ob_obj_cast.cpp is this time object will be
@@ -5395,7 +5393,7 @@ int ObTimeConverter::time_overflow_trunc(int64_t &value, const ObScale &time_sca
     // so we get the ONLY one: OB_ERR_TRUNCATED_WRONG_VALUE, because the other two will direct to
     // ZERO_VAL of the temporal types, like cast 'abc' or '1998-76-54' to date.
     ret = OB_ERR_TRUNCATED_WRONG_VALUE;
-    value = TIME_MAX_VAL + increment;
+    value = TIME_MAX_VAL;
   }
   return ret;
 }

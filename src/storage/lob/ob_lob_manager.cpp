@@ -420,7 +420,8 @@ int ObLobManager::is_remote(ObLobAccessParam& param, bool& is_remote, common::Ob
     } else {
       is_remote = (dst_addr != self_addr);
       if (param.from_rpc_ == true && is_remote) {
-        LOG_WARN("call from rpc, but remote again", K(dst_addr), K(self_addr));
+        ret = OB_NOT_MASTER;
+        LOG_WARN("call from rpc, but remote again", K(ret), K(dst_addr), K(self_addr));
       }
     }
   }
@@ -453,10 +454,14 @@ int ObLobManager::query_remote(ObLobAccessParam& param, common::ObAddr& dst_addr
       arg.lob_locator_.ptr_ = param.lob_locator_->ptr_;
       arg.lob_locator_.size_ = param.lob_locator_->size_;
       arg.lob_locator_.has_lob_header_ = param.lob_locator_->has_lob_header_;
+      int64_t timeout = param.timeout_ - ObTimeUtility::current_time();
+      if (timeout < ObStorageRpcProxy::STREAM_RPC_TIMEOUT) {
+        timeout = ObStorageRpcProxy::STREAM_RPC_TIMEOUT;
+      }
       ret = svr_rpc_proxy->to(dst_addr).by(arg.tenant_id_)
                           .dst_cluster_id(GCONF.cluster_id)
                           .ratelimit(true).bg_flow(obrpc::ObRpcProxy::BACKGROUND_FLOW)
-                          .timeout(ObStorageRpcProxy::STREAM_RPC_TIMEOUT)
+                          .timeout(timeout)
                           .lob_query(arg, rpc_buffer, handle);
       if (OB_FAIL(ret)) {
         LOG_WARN("failed to do remote query", K(ret));
@@ -509,13 +514,19 @@ int ObLobManager::query(
       LOG_WARN("get lob data null.", K(ret));
     } else if (OB_FAIL(check_handle_size(param))) {
       LOG_WARN("check handle size failed.", K(ret));
-    } else if (lob_common->in_row_) {
+    } else if (lob_common->in_row_ || (param.lob_locator_ != nullptr && param.lob_locator_->has_inrow_data())) {
       ObString data;
-      if (lob_common->is_init_) {
-        param.lob_data_ = reinterpret_cast<ObLobData*>(lob_common->buffer_);
-        data.assign_ptr(param.lob_data_->buffer_, param.lob_data_->byte_size_);
-      } else {
-        data.assign_ptr(lob_common->buffer_, param.byte_size_);
+      if (param.lob_locator_ != nullptr && param.lob_locator_->has_inrow_data()) {
+        if (OB_FAIL(param.lob_locator_->get_inrow_data(data))) {
+          LOG_WARN("fail to get inrow data", K(ret), KPC(param.lob_locator_));
+        }
+      } else { // lob_common->in_row_
+        if (lob_common->is_init_) {
+          param.lob_data_ = reinterpret_cast<ObLobData*>(lob_common->buffer_);
+          data.assign_ptr(param.lob_data_->buffer_, param.lob_data_->byte_size_);
+        } else {
+          data.assign_ptr(lob_common->buffer_, param.byte_size_);
+        }
       }
       uint32_t byte_offset = param.offset_ > data.length() ? data.length() : param.offset_;
       uint32_t max_len = ObCharset::strlen_char(param.coll_type_, data.ptr(), data.length()) - byte_offset;
@@ -640,6 +651,18 @@ int ObLobManager::query(
       LOG_WARN("get lob data null.", K(ret));
     } else if (OB_FAIL(check_handle_size(param))) {
       LOG_WARN("check handle size failed.", K(ret));
+    } else if (param.lob_locator_ != nullptr && param.lob_locator_->has_inrow_data()) {
+      ObString data;
+      if (OB_FAIL(param.lob_locator_->get_inrow_data(data))) {
+        LOG_WARN("fail to get inrow data", K(ret), KPC(param.lob_locator_));
+      } else if (OB_FAIL(query_inrow_get_iter(param, data, param.offset_, param.scan_backward_, result))) {
+        LOG_WARN("fail to get inrow query iter", K(ret));
+        if (OB_NOT_NULL(result)) {
+          result->reset();
+          common::sop_return(ObLobQueryIter, result);
+          result = nullptr;
+        }
+      }
     } else if (lob_common->in_row_) {
       ObString data;
       if (lob_common->is_init_) {
@@ -707,7 +730,8 @@ int ObLobManager::compare(ObLobLocatorV2& lob_left,
     // get lob access param
     ObLobAccessParam param_left;
     ObLobAccessParam param_right;
-
+    param_left.tx_desc_ = cmp_params.tx_desc_;
+    param_right.tx_desc_ = cmp_params.tx_desc_;
     if (OB_FAIL(build_lob_param(param_left, tmp_allocator, cmp_params.collation_left_,
                 cmp_params.offset_left_, cmp_params.compare_len_, cmp_params.timeout_, lob_left))) {
       LOG_WARN("fail to build read param left", K(ret), K(lob_left), K(cmp_params));
@@ -1103,7 +1127,7 @@ int ObLobManager::append(
   } else if (lob.is_delta_temp_lob()) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("invalid lob locator", K(ret));
-  } else if (lob.is_inrow()) {
+  } else if (lob.has_inrow_data()) {
     ObString data;
     if (OB_FAIL(lob.get_inrow_data(data))) {
       LOG_WARN("get inrow data int insert lob col failed", K(lob), K(data));
@@ -1156,6 +1180,7 @@ int ObLobManager::append(
         ObString data;
         data.assign_buffer(buf + cur_handle_size, append_lob_len);
         SMART_VAR(ObLobAccessParam, read_param) {
+          read_param.tx_desc_ = param.tx_desc_;
           if (OB_FAIL(build_lob_param(read_param, *param.allocator_, param.coll_type_,
                       0, UINT64_MAX, param.timeout_, lob))) {
             LOG_WARN("fail to build read param", K(ret), K(lob));
@@ -1279,6 +1304,7 @@ int ObLobManager::append(
       // prepare read full lob
       if (OB_SUCC(ret)) {
         SMART_VAR(ObLobAccessParam, read_param) {
+          read_param.tx_desc_ = param.tx_desc_;
           if (OB_FAIL(build_lob_param(read_param, *param.allocator_, param.coll_type_,
                       0, UINT64_MAX, param.timeout_, lob))) {
             LOG_WARN("fail to build read param", K(ret), K(lob));
@@ -1808,10 +1834,14 @@ int ObLobManager::getlength_remote(ObLobAccessParam& param, common::ObAddr& dst_
       arg.lob_locator_.ptr_ = param.lob_locator_->ptr_;
       arg.lob_locator_.size_ = param.lob_locator_->size_;
       arg.lob_locator_.has_lob_header_ = param.lob_locator_->has_lob_header_;
+      int64_t timeout = param.timeout_ - ObTimeUtility::current_time();
+      if (timeout < ObStorageRpcProxy::STREAM_RPC_TIMEOUT) {
+        timeout = ObStorageRpcProxy::STREAM_RPC_TIMEOUT;
+      }
       ret = svr_rpc_proxy->to(dst_addr).by(arg.tenant_id_)
                           .dst_cluster_id(GCONF.cluster_id)
                           .ratelimit(true).bg_flow(obrpc::ObRpcProxy::BACKGROUND_FLOW)
-                          .timeout(ObStorageRpcProxy::STREAM_RPC_TIMEOUT)
+                          .timeout(timeout)
                           .lob_query(arg, rpc_buffer, handle);
       if (OB_FAIL(ret)) {
         LOG_WARN("failed to do remote query", K(ret));
@@ -1903,17 +1933,26 @@ int ObLobManager::getlength(ObLobAccessParam& param, uint64_t &len)
       LOG_WARN("check handle size failed.", K(ret));
     } else if (!is_char) { // return byte len
       len = lob_common->get_byte_size(param.handle_size_);
-    } else if (lob_common->in_row_) { // calc char len
-      ObString data;
-      if (lob_common->is_init_) {
-        param.lob_data_ = reinterpret_cast<ObLobData*>(lob_common->buffer_);
-        data.assign_ptr(param.lob_data_->buffer_, param.lob_data_->byte_size_);
-      } else {
-        data.assign_ptr(lob_common->buffer_, param.byte_size_);
-      }
-      len = ObCharset::strlen_char(param.coll_type_, data.ptr(), data.length());
     } else if (lob_handle_has_char_len(param)) {
       len = *get_char_len_ptr(param);
+    } else if (lob_common->in_row_ || // calc char len
+               (param.lob_locator_ != nullptr && param.lob_locator_->has_inrow_data())) {
+      ObString data;
+      if (param.lob_locator_ != nullptr && param.lob_locator_->has_inrow_data()) {
+        if (OB_FAIL(param.lob_locator_->get_inrow_data(data))) {
+          LOG_WARN("fail to get inrow data", K(ret), KPC(param.lob_locator_));
+        }
+      } else {
+        if (lob_common->is_init_) {
+          param.lob_data_ = reinterpret_cast<ObLobData*>(lob_common->buffer_);
+          data.assign_ptr(param.lob_data_->buffer_, param.lob_data_->byte_size_);
+        } else {
+          data.assign_ptr(lob_common->buffer_, param.byte_size_);
+        }
+      }
+      if (OB_SUCC(ret)) {
+        len = ObCharset::strlen_char(param.coll_type_, data.ptr(), data.length());
+      }
     } else { // do meta scan
       bool is_remote_lob = false;
       common::ObAddr dst_addr;
@@ -2049,6 +2088,7 @@ int ObLobManager::write_inrow(ObLobAccessParam& param, ObLobLocatorV2& lob, uint
 {
   int ret = OB_SUCCESS;
   SMART_VAR(ObLobAccessParam, read_param) {
+    read_param.tx_desc_ = param.tx_desc_;
     if (OB_FAIL(build_lob_param(read_param, *param.allocator_, param.coll_type_,
                 offset, param.len_, param.timeout_, lob))) {
       LOG_WARN("fail to build read param", K(ret), K(lob));
@@ -2202,6 +2242,10 @@ int ObLobManager::write_outrow_inner(ObLobAccessParam& param, ObLobQueryIter *it
     uint64_t padding_size = 0;
     uint64_t pos = 0;
     if (old_data.length() == 0) {
+      if (param.scan_backward_) {
+        LOG_INFO("param scan_backward is true. Make it be false.", K(param));
+        param.scan_backward_ = false;
+      }
       if (OB_FAIL(prepare_write_buffers(param, remain_buf, tmp_buf))) {
         LOG_WARN("fail to prepare buffers", K(ret));
       } else if (OB_FAIL(lob_ctx_.lob_meta_mngr_->scan(param, meta_iter))) {
@@ -2222,14 +2266,14 @@ int ObLobManager::write_outrow_inner(ObLobAccessParam& param, ObLobQueryIter *it
           } else {
             if (meta_iter.is_range_begin(result.meta_result_.info_)) {
               if (OB_FAIL(range_begin.deep_copy(*param.allocator_, result.meta_result_.info_))) {
-                LOG_WARN("deep copy meta info failed", K(ret));
+                LOG_WARN("deep copy meta info failed", K(ret), K(meta_iter));
               } else {
                 found_begin = true;
               }
             }
             if (OB_SUCC(ret) && meta_iter.is_range_end(result.meta_result_.info_)) {
               if (OB_FAIL(range_end.deep_copy(*param.allocator_, result.meta_result_.info_))) {
-                LOG_WARN("deep copy meta info failed", K(ret));
+                LOG_WARN("deep copy meta info failed", K(ret), K(meta_iter));
               } else {
                 found_end = true;
               }
@@ -2298,9 +2342,11 @@ int ObLobManager::write_outrow_inner(ObLobAccessParam& param, ObLobQueryIter *it
       // prepare write iter
       ObLobMetaWriteIter write_iter(read_buf, param.allocator_, ObLobMetaUtil::LOB_OPER_PIECE_DATA_SIZE);
       if (OB_FAIL(write_iter.open(param, iter, read_buf, padding_size, post_data, remain_buf, seq_id_st, seq_id_ed))) {
-        LOG_WARN("failed to open meta writer", K(ret));
+        LOG_WARN("failed to open meta writer", K(ret), K(write_iter), K(meta_iter), K(found_begin), K(found_end),
+                 K(range_begin), K(range_end));
       } else if (OB_FAIL(write_outrow_result(param, write_iter))) {
-        LOG_WARN("failed to write outrow result", K(ret));
+        LOG_WARN("failed to write outrow result", K(ret), K(write_iter), K(meta_iter), K(found_begin), K(found_end),
+                 K(range_begin), K(range_end));
       }
       write_iter.close();
     }
@@ -2312,6 +2358,7 @@ int ObLobManager::write_outrow(ObLobAccessParam& param, ObLobLocatorV2& lob, uin
 {
   int ret = OB_SUCCESS;
   SMART_VAR(ObLobAccessParam, read_param) {
+    read_param.tx_desc_ = param.tx_desc_;
     if (OB_FAIL(build_lob_param(read_param, *param.allocator_, param.coll_type_,
                 offset, param.len_, param.timeout_, lob))) {
       LOG_WARN("fail to build read param", K(ret), K(lob));
@@ -2810,7 +2857,11 @@ int ObLobManager::erase_process_meta_info(ObLobAccessParam& param, ObLobMetaScan
     ObLobMetaInfo new_meta_row = result.meta_result_.info_;
     char* tmp_buf = tmp_buff.ptr();
     ObString read_data;
-    read_data.assign_buffer(tmp_buf, result.meta_result_.info_.byte_len_);
+    if (param.is_fill_zero_) {
+      read_data.assign_buffer(tmp_buf, result.meta_result_.info_.byte_len_);
+    } else {
+      read_data = result.meta_result_.info_.lob_data_;
+    }
 
     // save variable
     uint32_t tmp_st = result.meta_result_.st_;
@@ -2822,7 +2873,7 @@ int ObLobManager::erase_process_meta_info(ObLobAccessParam& param, ObLobMetaScan
     if (OB_ISNULL(tmp_buf)) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("tmp buffer is null.", K(ret), K(tmp_buff));
-    } else if (OB_FAIL(get_real_data(param, result, read_data))) {
+    } else if (param.is_fill_zero_ && OB_FAIL(get_real_data(param, result, read_data))) {
       LOG_WARN("failed to write data to read buf.", K(ret), K(result));
     } else {
       result.meta_result_.st_ = tmp_st;
@@ -2876,10 +2927,15 @@ int ObLobManager::erase_process_meta_info(ObLobAccessParam& param, ObLobMetaScan
             read_data.set_length(read_data.length() - by_len + fill_char_len);
             new_meta_row.byte_len_ = read_data.length();
           } else {
-            new_meta_row.byte_len_ -= (by_len);
-            new_meta_row.char_len_ -= (local_end - local_begin);
-            MEMMOVE(read_data.ptr() + by_st, read_data.ptr() + (by_st + by_len), piece_byte_len - (by_st + by_len));
-            read_data.assign_ptr(read_data.ptr(), read_data.length() - by_len);
+            read_data.assign_buffer(tmp_buf, result.meta_result_.info_.byte_len_);
+            if (OB_FAIL(get_real_data(param, result, read_data))) {
+              LOG_WARN("failed to write data to read buf.", K(ret), K(result));
+            } else {
+              new_meta_row.byte_len_ -= (by_len);
+              new_meta_row.char_len_ -= (local_end - local_begin);
+              MEMMOVE(read_data.ptr() + by_st, read_data.ptr() + (by_st + by_len), piece_byte_len - (by_st + by_len));
+              read_data.assign_ptr(read_data.ptr(), read_data.length() - by_len);
+            }
           }
         } else {
           del_piece = true;
@@ -2928,10 +2984,15 @@ int ObLobManager::erase_process_meta_info(ObLobAccessParam& param, ObLobMetaScan
             read_data.set_length(fill_char_len + read_data.length() - by_len);
             new_meta_row.byte_len_ = read_data.length();
           } else {
-            new_meta_row.char_len_ = piece_char_len - local_end;
-            new_meta_row.byte_len_ = read_data.length() - by_len;
-            MEMMOVE(read_data.ptr(), read_data.ptr() + by_len, read_data.length() - by_len);
-            read_data.assign_ptr(read_data.ptr(), read_data.length() - by_len);
+            read_data.assign_buffer(tmp_buf, result.meta_result_.info_.byte_len_);
+            if (OB_FAIL(get_real_data(param, result, read_data))) {
+              LOG_WARN("failed to write data to read buf.", K(ret), K(result));
+            } else {
+              new_meta_row.char_len_ = piece_char_len - local_end;
+              new_meta_row.byte_len_ = read_data.length() - by_len;
+              MEMMOVE(read_data.ptr(), read_data.ptr() + by_len, read_data.length() - by_len);
+              read_data.assign_ptr(read_data.ptr(), read_data.length() - by_len);
+            }
           }
         }
       }
@@ -3124,7 +3185,7 @@ int ObLobManager::build_lob_param(ObLobAccessParam& param,
       param.len_ = len;
       param.timeout_ = timeout;
       // outrow arg for do lob meta scan
-      if (OB_SUCC(ret) && lob.is_persist_lob() && !lob.is_inrow()) {
+      if (OB_SUCC(ret) && lob.is_persist_lob() && !lob.has_inrow_data()) {
         ObMemLobTxInfo *tx_info = nullptr;
         ObMemLobLocationInfo *location_info = nullptr;
         if (OB_FAIL(lob.get_tx_info(tx_info))) {
@@ -3132,13 +3193,23 @@ int ObLobManager::build_lob_param(ObLobAccessParam& param,
         } else if (OB_FAIL(lob.get_location_info(location_info))) {
           LOG_WARN("failed to get location info", K(ret), K(lob));
         } else {
-          param.snapshot_.core_.version_.convert_for_tx(tx_info->version_);
-          param.snapshot_.core_.tx_id_ = tx_info->tx_id_;
-          param.snapshot_.core_.scn_ = tx_info->scn_;
-
-          param.snapshot_.valid_ = true;
-          param.snapshot_.source_ = transaction::ObTxReadSnapshot::SRC::LS;
-          param.snapshot_.snapshot_lsid_ = share::ObLSID(location_info->ls_id_);
+          if (OB_ISNULL(param.tx_desc_) || param.tx_desc_->get_tx_id().get_id() == tx_info->tx_id_) {
+            param.snapshot_.core_.version_.convert_for_tx(tx_info->version_);
+            param.snapshot_.core_.tx_id_ = tx_info->tx_id_;
+            param.snapshot_.core_.scn_ = tx_info->scn_;
+            param.snapshot_.valid_ = true;
+            param.snapshot_.source_ = transaction::ObTxReadSnapshot::SRC::LS;
+            param.snapshot_.snapshot_lsid_ = share::ObLSID(location_info->ls_id_);
+          } else {
+            // When param for write, param.tx_desc_ should not be null
+            // If tx indfo from lob locator is old, produce new read snapshot directly
+            transaction::ObTransService* txs = MTL(transaction::ObTransService*);
+            transaction::ObTxIsolationLevel tx_level = transaction::ObTxIsolationLevel::RC;
+            if (OB_FAIL(txs->get_ls_read_snapshot(*param.tx_desc_, tx_level, share::ObLSID(location_info->ls_id_),
+                                                  param.timeout_, param.snapshot_))) {
+              LOG_WARN("fail to get read snapshot", K(ret));
+            }
+          }
 
           param.ls_id_ = share::ObLSID(location_info->ls_id_);
           param.tablet_id_ = ObTabletID(location_info->tablet_id_);

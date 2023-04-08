@@ -46,16 +46,18 @@ struct ObLobCompareParams {
       offset_left_(0),
       offset_right_(0),
       compare_len_(0),
-      timeout_(0)
+      timeout_(0),
+      tx_desc_(nullptr)
   {
   }
 
   TO_STRING_KV(K(collation_left_),
-               KP(collation_right_),
+               K(collation_right_),
                K(offset_left_),
                K(offset_right_),
                K(compare_len_),
-               K(timeout_));
+               K(timeout_),
+               K(tx_desc_));
 
   ObCollationType collation_left_;
   ObCollationType collation_right_;
@@ -65,6 +67,7 @@ struct ObLobCompareParams {
   // compare length
   uint64_t compare_len_;
   int64_t timeout_;
+  transaction::ObTxDesc *tx_desc_;
 };
 
 class ObLobQueryRemoteReader

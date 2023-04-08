@@ -34,7 +34,8 @@ namespace memtable
 class ObMemtableCtxCbAllocator;
 class ObIMemtable;
 class ObMemtable;
-enum class MutatorType; 
+class ObCallbackScope;
+enum class MutatorType;
 
 class ObITransCallback;
 struct RedoDataNode
@@ -152,7 +153,9 @@ public:
     explicit WRLockGuard(const common::SpinRWLock &rwlock);
     ~WRLockGuard() {}
   private:
+#ifdef ENABLE_DEBUG_LOG
     common::ObSimpleTimeGuard time_guard_; // print log and lbt, if the lock is held too much time.
+#endif
     common::SpinWLockGuard lock_guard_;
   };
   class RDLockGuard
@@ -161,7 +164,9 @@ public:
     explicit RDLockGuard(const common::SpinRWLock &rwlock);
     ~RDLockGuard() {}
   private:
+#ifdef ENABLE_DEBUG_LOG
     common::ObSimpleTimeGuard time_guard_; // print log and lbt, if the lock is held too much time.
+#endif
     common::SpinRLockGuard lock_guard_;
   };
 
@@ -178,7 +183,6 @@ public:
       rwlock_(ObLatchIds::MEMTABLE_CALLBACK_LIST_MGR_LOCK),
       parallel_stat_(0),
       for_replay_(false),
-      leader_changed_(false),
       callback_main_list_append_count_(0),
       callback_slave_list_append_count_(0),
       callback_slave_list_merge_count_(0),
@@ -220,6 +224,8 @@ public:
 private:
   void wakeup_waiting_txns_();
 public:
+  int sync_log_fail(const ObCallbackScope &callbacks,
+                    int64_t &removed_cnt);
   int calc_checksum_before_scn(const share::SCN scn,
                                uint64_t &checksum,
                                share::SCN &checksum_scn);
@@ -233,9 +239,23 @@ public:
   void clear_pending_log_size() { ATOMIC_STORE(&pending_log_size_, 0); }
   int64_t get_pending_log_size() { return ATOMIC_LOAD(&pending_log_size_); }
   int64_t get_flushed_log_size() { return ATOMIC_LOAD(&flushed_log_size_); }
-  bool is_all_redo_submitted(ObITransCallback *generate_cursor)
+  bool is_all_redo_submitted()
   {
-    return (ObITransCallback *)callback_list_.get_tail() == generate_cursor;
+    bool all_redo_submitted = true;
+    if (OB_NOT_NULL(callback_lists_)) {
+      for (int64_t i = 0; i < MAX_CALLBACK_LIST_COUNT; ++i) {
+        if (!callback_lists_[i].empty()) {
+          all_redo_submitted = false;
+          break;
+        }
+      }
+    }
+
+    if (all_redo_submitted) {
+      all_redo_submitted = !(((ObITransCallback *)callback_list_.get_tail())->need_submit_log());
+    }
+
+    return all_redo_submitted;
   }
   void merge_multi_callback_lists();
   void reset_pdml_stat();
@@ -274,10 +294,6 @@ public:
   share::SCN get_checksum_scn() const { return callback_list_.get_checksum_scn(); }
   transaction::ObPartTransCtx *get_trans_ctx() const;
 private:
-  bool is_all_redo_submitted(ObMvccRowCallback *generate_cursor)
-  {
-    return (ObMvccRowCallback *)callback_list_.get_tail() == generate_cursor;
-  }
   void force_merge_multi_callback_lists();
 private:
   ObITransCallback *get_guard_() { return callback_list_.get_guard(); }
@@ -294,7 +310,6 @@ private:
     int64_t parallel_stat_;
   };
   bool for_replay_;
-  bool leader_changed_;
   // statistics for callback remove
   int64_t callback_main_list_append_count_;
   int64_t callback_slave_list_append_count_;

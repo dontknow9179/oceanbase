@@ -143,21 +143,23 @@ void ObSql::stat()
 {
   sql::print_sql_stat();
 }
+#define STMT_SUPPORT_BY_TXN_FREE_ROUTE(stmt_type, allow_ps)             \
+  (ObStmt::is_dml_stmt(stmt_type)                                       \
+   || (stmt_type == stmt::StmtType::T_VARIABLE_SET)                     \
+   || (stmt_type == stmt::StmtType::T_USE_DATABASE)                     \
+   || (allow_ps && stmt_type == stmt::StmtType::T_PREPARE)              \
+   || (allow_ps && stmt_type == stmt::StmtType::T_EXECUTE)              \
+   || (allow_ps && stmt_type == stmt::StmtType::T_DEALLOCATE))
 
 #define CHECK_STMT_SUPPORTED_BY_TXN_FREE_ROUTE(result, allow_ps)        \
  if (OB_SUCC(ret)) {                                                    \
    auto stmt_type = result.get_stmt_type();                             \
    auto &session = result.get_session();                                \
    if (!session.is_inner() && session.is_txn_free_route_temp()) {       \
-     if (ObStmt::is_dml_stmt(stmt_type)                                 \
-         || (stmt_type == stmt::StmtType::T_VARIABLE_SET)               \
-         || stmt_type == stmt::StmtType::T_USE_DATABASE                 \
-         || (allow_ps && stmt_type == stmt::StmtType::T_PREPARE)        \
-         || (allow_ps && stmt_type == stmt::StmtType::T_EXECUTE)        \
-         || (allow_ps && stmt_type == stmt::StmtType::T_DEALLOCATE)) {  \
-     } else {                                                           \
+     if (!STMT_SUPPORT_BY_TXN_FREE_ROUTE(stmt_type, allow_ps)) {        \
        ret = OB_TRANS_FREE_ROUTE_NOT_SUPPORTED;                         \
-       LOG_WARN("only DML stmt or SET command is supported to be executed on txn temporary node", KR(ret), K(stmt_type)); \
+       LOG_WARN("only DML stmt or SET command is supported to be executed on txn temporary node", \
+                KR(ret), K(stmt_type), K(session.get_txn_free_route_ctx()), K(session)); \
      }                                                                  \
    }                                                                    \
  }
@@ -928,6 +930,7 @@ int ObSql::do_real_prepare(const ObString &sql,
                            bool is_inner_sql)
 {
   int ret = OB_SUCCESS;
+  bool enable_udr = false;
   ParseResult parse_result;
   ObStmt *basic_stmt = NULL;
   stmt::StmtType stmt_type = stmt::T_NONE;
@@ -955,10 +958,10 @@ int ObSql::do_real_prepare(const ObString &sql,
 
   CHECK_COMPATIBILITY_MODE(context.session_info_);
 
-  if (!tenant_config.is_valid()) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("tenant config is invalid", K(ret));
-  } else if (OB_ISNULL(context.session_info_) || OB_ISNULL(context.schema_guard_)) {
+  if (tenant_config.is_valid()) {
+    enable_udr = tenant_config->enable_user_defined_rewrite_rules;
+  }
+  if (OB_ISNULL(context.session_info_) || OB_ISNULL(context.schema_guard_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("session info is NULL", K(ret));
   } else if (OB_FAIL(parser.parse(sql,
@@ -1004,7 +1007,7 @@ int ObSql::do_real_prepare(const ObString &sql,
       LOG_WARN("generate stmt failed", K(ret));
     } else if (!is_from_pl
               && !is_inner_sql
-              && tenant_config->enable_user_defined_rewrite_rules
+              && enable_udr
               && OB_FAIL(ObUDRUtils::match_udr_item(sql, session, allocator, item_guard))) {
         LOG_WARN("failed to match rewrite rule", K(ret));
     } else if (ObStmt::is_dml_stmt(stmt_type)
@@ -1142,7 +1145,10 @@ int ObSql::set_timeout_for_pl(ObSQLSessionInfo &session_info, int64_t &abs_timeo
 {
   int ret = OB_SUCCESS;
   int64_t query_timeout;
-  if (OB_FAIL(session_info.get_query_timeout(query_timeout))) {
+  if (THIS_WORKER.is_timeout()) {
+    ret = OB_TIMEOUT;
+    LOG_WARN("already timeout", K(ret), K(abs_timeout_us), K(THIS_WORKER.get_timeout_ts()));
+  } else if (OB_FAIL(session_info.get_query_timeout(query_timeout))) {
     // do nothing
   } else {
     OX (abs_timeout_us = session_info.get_query_start_time() > 0
@@ -2363,7 +2369,8 @@ OB_INLINE int ObSql::handle_text_query(const ObString &stmt, ObSqlCtx &context, 
   }
 
   int tmp_ret = ret;
-  if (!is_begin_commit_stmt && GCONF.enable_perf_event
+  if (!is_begin_commit_stmt
+      && 0 == context.multi_stmt_item_.get_seq_num() /* only first item of a multi stmt, or single stmt */
       && OB_FAIL(handle_large_query(tmp_ret,
                                     result,
                                     ectx.get_need_disconnect_for_update(),
@@ -2508,6 +2515,7 @@ int ObSql::generate_stmt(ParseResult &parse_result,
     resolver_ctx.is_ddl_from_primary_ = context.is_ddl_from_primary_;
     resolver_ctx.is_cursor_ = context.is_cursor_;
     resolver_ctx.is_batch_stmt_ = context.multi_stmt_item_.is_batched_multi_stmt();
+    resolver_ctx.batch_stmt_num_ = context.multi_stmt_item_.get_batched_stmt_cnt();
     if (NULL != pc_ctx && pc_ctx->is_remote_executor_) {
       resolver_ctx.need_check_col_dup_
         = !(context.is_prepare_protocol_ && parse_result.question_mark_ctx_.by_ordinal_ && pc_ctx->is_original_ps_mode_);
@@ -3888,7 +3896,7 @@ int ObSql::parser_and_check(const ObString &outlined_stmt,
 
     bool read_only = false;
     //租户级别的read only检查
-    if (session->is_inner() || (pc_ctx.is_begin_commit_stmt() && !GCONF.enable_perf_event)) {
+    if (session->is_inner() || pc_ctx.is_begin_commit_stmt()) {
       // FIXME:
       // schema拆分后，为了避免建租户时获取不到租户read only属性导致建租户失败，对于inner sql
       // 暂时跳过read only检查。实际上，对于tenant space系统表，不应该检查read only属性。
@@ -4000,17 +4008,18 @@ int ObSql::pc_add_plan(ObPlanCacheCtx &pc_ctx,
                        bool& plan_added)
 {
   int ret = OB_SUCCESS;
+  bool enable_udr = false;
   ObPhysicalPlan *phy_plan = result.get_physical_plan();
   pc_ctx.fp_result_.pc_key_.namespace_ = ObLibCacheNameSpace::NS_CRSR;
   plan_added = false;
   bool is_batch_exec = pc_ctx.sql_ctx_.multi_stmt_item_.is_batched_multi_stmt();
   omt::ObTenantConfigGuard tenant_config(TENANT_CONF(MTL_ID()));
+  if (tenant_config.is_valid()) {
+    enable_udr = tenant_config->enable_user_defined_rewrite_rules;
+  }
   if (OB_ISNULL(phy_plan) || OB_ISNULL(plan_cache)) {
     ret = OB_NOT_INIT;
     LOG_WARN("Fail to generate plan", K(phy_plan), K(plan_cache));
-  } else if (!tenant_config.is_valid()) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("tenant config is invalid", K(ret));
   } else if (OB_USE_PLAN_CACHE_NONE == phy_plan->get_phy_plan_hint().plan_cache_policy_) {
     LOG_DEBUG("Hint not use plan cache");
   } else if (OB_FAIL(result.to_plan(pc_ctx.mode_, phy_plan))) {
@@ -4033,7 +4042,7 @@ int ObSql::pc_add_plan(ObPlanCacheCtx &pc_ctx,
     phy_plan->stat_.db_id_ = pc_ctx.sql_ctx_.spm_ctx_.bl_key_.db_id_;
     phy_plan->stat_.is_rewrite_sql_ = pc_ctx.is_rewrite_sql_;
     phy_plan->stat_.rule_version_ = rule_mgr->get_rule_version();
-    phy_plan->stat_.enable_udr_ = tenant_config->enable_user_defined_rewrite_rules;
+    phy_plan->stat_.enable_udr_ = enable_udr;
 
     if (PC_PS_MODE == pc_ctx.mode_ || PC_PL_MODE == pc_ctx.mode_) {
       //远程SQL第二次进入plan，将raw_sql作为pc_key存入plan cache中，
@@ -4170,7 +4179,7 @@ int ObSql::after_get_plan(ObPlanCacheCtx &pc_ctx,
       if (OB_SUCC(ret)) {
         DAS_CTX(pc_ctx.exec_ctx_).unmark_need_check_server();
         bool need_reroute = false;
-        if (OB_FAIL(check_need_reroute(pc_ctx, phy_plan, need_reroute))) {
+        if (OB_FAIL(check_need_reroute(pc_ctx, session, phy_plan, need_reroute))) {
           LOG_WARN("fail to check need reroute", K(ret));
         } else if (need_reroute) {
           ret = OB_ERR_PROXY_REROUTE;
@@ -4179,7 +4188,7 @@ int ObSql::after_get_plan(ObPlanCacheCtx &pc_ctx,
 
       // the purpose of adding condition (!session.get_is_in_retry()) is
       // send the plan instead of continue sending sqlinfo when retrying remotely.
-      // bug: https://work.aone.alibaba-inc.com/issue/33487009
+      // bug:
       if (OB_SUCC(ret) && phy_plan->is_remote_plan()
           && !phy_plan->contains_temp_table()
           && !enable_send_plan) {
@@ -4272,7 +4281,7 @@ int ObSql::after_get_plan(ObPlanCacheCtx &pc_ctx,
       if (has_session_tmp_table || has_txn_tmp_table) {
         if (!session.is_inner() && session.is_txn_free_route_temp()) {
           ret = OB_TRANS_FREE_ROUTE_NOT_SUPPORTED;
-          LOG_WARN("access temp table is supported to be executed on txn temporary node", KR(ret));
+          LOG_WARN("access temp table is supported to be executed on txn temporary node", KR(ret), K(session.get_txn_free_route_ctx()));
         } else if (has_session_tmp_table) {
           bool is_already_set = false;
           if (OB_FAIL(session.get_session_temp_table_used(is_already_set))) {
@@ -4893,7 +4902,7 @@ int ObSql::handle_text_execute(const ObStmt *basic_stmt,
   return ret;
 }
 
-int ObSql::check_need_reroute(ObPlanCacheCtx &pc_ctx, ObPhysicalPlan *plan, bool &need_reroute)
+int ObSql::check_need_reroute(ObPlanCacheCtx &pc_ctx, ObSQLSessionInfo &session, ObPhysicalPlan *plan, bool &need_reroute)
 {
   int ret = OB_SUCCESS;
   need_reroute = false;
@@ -4915,6 +4924,28 @@ int ObSql::check_need_reroute(ObPlanCacheCtx &pc_ctx, ObPhysicalPlan *plan, bool
         should_reroute = false;
       }
     }
+
+    // CHECK for `TXN_FREE_ROUTE`
+    if (should_reroute && !session.is_inner() && session.is_in_transaction()) {
+      auto stmt_type = plan->get_stmt_type();
+      bool fixed_route = true;
+      if (pc_ctx.sql_ctx_.multi_stmt_item_.is_part_of_multi_stmt()) {
+        // current is multi-stmt
+      } else if (!STMT_SUPPORT_BY_TXN_FREE_ROUTE(stmt_type, false)) {
+        // stmt is not DML
+      } else if (plan->is_contain_oracle_session_level_temporary_table()
+                 || plan->contains_temp_table()
+                 || plan->is_contain_oracle_trx_level_temporary_table()) {
+        // access temp table
+      } else {
+        fixed_route = false;
+      }
+      if (fixed_route) {
+        // multi-stmt or stmt disallow on other node, can not be rerouted
+        should_reroute = false;
+      }
+    }
+
     if (OB_ISNULL(pc_ctx.sql_ctx_.schema_guard_)) {
       ret = OB_INVALID_ARGUMENT;
       LOG_WARN("invalid null schema guard", K(ret));
@@ -4935,7 +4966,7 @@ int ObSql::check_need_reroute(ObPlanCacheCtx &pc_ctx, ObPhysicalPlan *plan, bool
         } else if (OB_ISNULL(table_schema)) {
           ret = OB_INVALID_ARGUMENT;
           LOG_WARN("invalid null table schema", K(ret));
-        } else if (OB_ISNULL(pc_ctx.sql_ctx_.get_reroute_info())) {
+        } else if (OB_ISNULL(pc_ctx.sql_ctx_.get_or_create_reroute_info())) {
           ret = OB_ALLOCATE_MEMORY_FAILED;
           LOG_WARN("get reroute info failed", K(ret));
         } else if (OB_FAIL(loc_router.get_full_ls_replica_loc(table_schema->get_tenant_id(),
@@ -4943,12 +4974,28 @@ int ObSql::check_need_reroute(ObPlanCacheCtx &pc_ctx, ObPhysicalPlan *plan, bool
                                                               ls_replica_loc))) {
           LOG_WARN("get full ls replica location failed", K(ret), KPC(first_tablet_loc));
         } else {
-          pc_ctx.sql_ctx_.get_reroute_info()->server_ = ls_replica_loc.get_server();
-          pc_ctx.sql_ctx_.get_reroute_info()->server_.set_port(static_cast<int32_t>(ls_replica_loc.get_sql_port()));
-          pc_ctx.sql_ctx_.get_reroute_info()->role_ = ls_replica_loc.get_role();
-          pc_ctx.sql_ctx_.get_reroute_info()->replica_type_ = ls_replica_loc.get_replica_type();
-          pc_ctx.sql_ctx_.get_reroute_info()->set_tbl_name(table_schema->get_table_name());
-          pc_ctx.sql_ctx_.get_reroute_info()->tbl_schema_version_ = table_schema->get_schema_version();
+          bool is_weak = false;
+          if (plan->is_select_plan()) {
+            if (pc_ctx.sql_ctx_.is_protocol_weak_read_) {
+              is_weak = true;
+            } else if (OB_UNLIKELY(INVALID_CONSISTENCY != plan->get_phy_plan_hint().read_consistency_)) {
+              is_weak = (WEAK == plan->get_phy_plan_hint().read_consistency_);
+            } else {
+              is_weak = (WEAK == pc_ctx.sql_ctx_.session_info_->get_consistency_level());
+            }
+          }
+          // if weak delay read, no need to return reroute_info.
+          if (pc_ctx.sql_ctx_.session_info_->
+              get_proxy_cap_flags().is_weak_stale_feedback() && is_weak) {
+            pc_ctx.sql_ctx_.reset_reroute_info();
+          } else {
+            pc_ctx.sql_ctx_.get_reroute_info()->server_ = ls_replica_loc.get_server();
+            pc_ctx.sql_ctx_.get_reroute_info()->server_.set_port(static_cast<int32_t>(ls_replica_loc.get_sql_port()));
+            pc_ctx.sql_ctx_.get_reroute_info()->role_ = ls_replica_loc.get_role();
+            pc_ctx.sql_ctx_.get_reroute_info()->replica_type_ = ls_replica_loc.get_replica_type();
+            pc_ctx.sql_ctx_.get_reroute_info()->set_tbl_name(table_schema->get_table_name());
+            pc_ctx.sql_ctx_.get_reroute_info()->tbl_schema_version_ = table_schema->get_schema_version();
+          }
           LOG_DEBUG("reroute sql", KPC(pc_ctx.sql_ctx_.get_reroute_info()));
           need_reroute = true;
         }

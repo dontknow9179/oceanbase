@@ -310,7 +310,7 @@ int ObInnerTableSchema::user_trigger_ordering_schema(ObTableSchema &table_schema
   table_schema.set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
 
   if (OB_SUCC(ret)) {
-    if (OB_FAIL(table_schema.set_view_definition(R"__(   SELECT CAST(TRG.TRIGGER_NAME AS VARCHAR2(128)) AS TRIGGER_NAME,          CAST(TRG.REF_TRG_DB_NAME AS VARCHAR2(128)) AS REFERENCED_TRIGGER_OWNER,          CAST(TRG.REF_TRG_NAME AS VARCHAR2(128)) AS REFERENCED_TRIGGER_NAME,          CAST(DECODE(TRG.ORDER_TYPE,                      1, 'FOLLOWS',                      2, 'PRECEDES') AS VARCHAR2(8)) AS ORDERING_TYPE   FROM (SELECT * FROM SYS.ALL_VIRTUAL_TENANT_TRIGGER_REAL_AGENT          WHERE TENANT_ID = EFFECTIVE_TENANT_ID() AND ORDER_TYPE > 0 AND ACTION_ORDER > 1)TRG   WHERE TRG.DATABASE_ID = USERENV('SCHEMAID') )__"))) {
+    if (OB_FAIL(table_schema.set_view_definition(R"__(   SELECT CAST(TRG.TRIGGER_NAME AS VARCHAR2(128)) AS TRIGGER_NAME,          CAST(TRG.REF_TRG_DB_NAME AS VARCHAR2(128)) AS REFERENCED_TRIGGER_OWNER,          CAST(TRG.REF_TRG_NAME AS VARCHAR2(128)) AS REFERENCED_TRIGGER_NAME,          CAST(DECODE(TRG.ORDER_TYPE,                      1, 'FOLLOWS',                      2, 'PRECEDES') AS VARCHAR2(8)) AS ORDERING_TYPE   FROM (SELECT * FROM SYS.ALL_VIRTUAL_TENANT_TRIGGER_REAL_AGENT         WHERE TENANT_ID = EFFECTIVE_TENANT_ID() AND ORDER_TYPE > 0 AND ACTION_ORDER > 1)TRG   WHERE TRG.DATABASE_ID = USERENV('SCHEMAID') )__"))) {
       LOG_ERROR("fail to set view_definition", K(ret));
     }
   }
@@ -360,7 +360,7 @@ int ObInnerTableSchema::gv_ob_transaction_schedulers_ora_schema(ObTableSchema &t
   table_schema.set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
 
   if (OB_SUCC(ret)) {
-    if (OB_FAIL(table_schema.set_view_definition(R"__(SELECT     tenant_id AS TENANT_ID,     svr_ip AS SVR_IP,     svr_port AS SVR_PORT,     session_id AS SESSION_ID,     trans_id AS TX_ID,     CASE       WHEN state = 0 THEN 'INVALID'       WHEN state = 1 THEN 'IDLE'       WHEN state = 2 THEN 'EXPLICIT_ACTIVE'       WHEN state = 3 THEN 'IMPLICIT_ACTIVE'       WHEN state = 4 THEN 'ROLLBACK_SAVEPOINT'       WHEN state = 5 THEN 'IN_TERMINATE'       WHEN state = 6 THEN 'ABORTED'       WHEN state = 7 THEN 'ROLLED_BACK'       WHEN state = 8 THEN 'COMMIT_TIMEOUT'       WHEN state = 9 THEN 'COMMIT_UNKNOWN'       WHEN state = 10 THEN 'COMMITTED'       WHEN state = 11 THEN 'SUB_PREPARING'       WHEN state = 12 THEN 'SUB_PREPARED'       WHEN state = 13 THEN 'SUB_COMMITTING'       WHEN state = 14 THEN 'SUB_COMMITTED'       WHEN state = 15 THEN 'SUB_ROLLBACKING'       WHEN state = 16 THEN 'SUB_ROLLBACKED'       ELSE 'UNKNOWN'       END AS STATE,     cluster_id AS CLUSTER_ID,     XA_trans_id AS XA_TX_ID,     coordinator AS COORDINATOR,     participants AS PARTICIPANTS,     CASE       WHEN isolation_level = -1 THEN 'INVALID'       WHEN isolation_level = 0 THEN 'READ UNCOMMITTED'       WHEN isolation_level = 1 THEN 'READ COMMITTED'       WHEN isolation_level = 2 THEN 'REPEATABLE READ'       WHEN isolation_level = 3 THEN 'SERIALIZABLE'       ELSE 'UNKNOWN'       END AS ISOLATION_LEVEL,     snapshot_version AS SNAPSHOT_VERSION,     CASE       WHEN access_mode = -1 THEN 'INVALID'       WHEN access_mode = 0 THEN 'READ_WRITE'       WHEN access_mode = 1 THEN 'READ_ONLY'       ELSE 'UNKNOWN'       END AS ACCESS_MODE,     tx_op_sn AS TX_OP_SN,     flag AS FLAG,     active_time AS ACTIVE_TIME,     expire_time AS EXPIRE_TIME,     timeout_us AS TIMEOUT_US,     savepoints AS SAVEPOINTS,     savepoints_total_cnt AS SAVEPOINTS_TOTAL_CNT,     CASE       WHEN can_early_lock_release = 0 THEN 'FALSE'       WHEN can_early_lock_release = 1 THEN 'TRUE'       ELSE 'UNKNOWN'       END AS CAN_EARLY_LOCK_RELEASE     FROM SYS.ALL_VIRTUAL_TRANS_SCHEDULER )__"))) {
+    if (OB_FAIL(table_schema.set_view_definition(R"__(SELECT     tenant_id AS TENANT_ID,     svr_ip AS SVR_IP,     svr_port AS SVR_PORT,     session_id AS SESSION_ID,     trans_id AS TX_ID,     CAST (CASE       WHEN state = 0 THEN 'INVALID'       WHEN state = 1 THEN 'IDLE'       WHEN state = 2 THEN 'EXPLICIT_ACTIVE'       WHEN state = 3 THEN 'IMPLICIT_ACTIVE'       WHEN state = 4 THEN 'ROLLBACK_SAVEPOINT'       WHEN state = 5 THEN 'IN_TERMINATE'       WHEN state = 6 THEN 'ABORTED'       WHEN state = 7 THEN 'ROLLED_BACK'       WHEN state = 8 THEN 'COMMIT_TIMEOUT'       WHEN state = 9 THEN 'COMMIT_UNKNOWN'       WHEN state = 10 THEN 'COMMITTED'       WHEN state = 11 THEN 'SUB_PREPARING'       WHEN state = 12 THEN 'SUB_PREPARED'       WHEN state = 13 THEN 'SUB_COMMITTING'       WHEN state = 14 THEN 'SUB_COMMITTED'       WHEN state = 15 THEN 'SUB_ROLLBACKING'       WHEN state = 16 THEN 'SUB_ROLLBACKED'       ELSE 'UNKNOWN'       END AS VARCHAR2(18)) AS STATE,     cluster_id AS CLUSTER_ID,     coordinator AS COORDINATOR,     participants AS PARTICIPANTS,     CAST (CASE       WHEN isolation_level = -1 THEN 'INVALID'       WHEN isolation_level = 0 THEN 'READ UNCOMMITTED'       WHEN isolation_level = 1 THEN 'READ COMMITTED'       WHEN isolation_level = 2 THEN 'REPEATABLE READ'       WHEN isolation_level = 3 THEN 'SERIALIZABLE'       ELSE 'UNKNOWN'       END AS VARCHAR2(16)) AS ISOLATION_LEVEL,     snapshot_version AS SNAPSHOT_VERSION,     CAST (CASE       WHEN access_mode = -1 THEN 'INVALID'       WHEN access_mode = 0 THEN 'READ_WRITE'       WHEN access_mode = 1 THEN 'READ_ONLY'       ELSE 'UNKNOWN'       END AS VARCHAR2(10)) AS ACCESS_MODE,     tx_op_sn AS TX_OP_SN,     active_time AS ACTIVE_TIME,     expire_time AS EXPIRE_TIME,     CAST (CASE       WHEN can_early_lock_release = 0 THEN 'FALSE'       WHEN can_early_lock_release = 1 THEN 'TRUE'       ELSE 'UNKNOWN'       END AS VARCHAR2(7)) AS CAN_EARLY_LOCK_RELEASE,     format_id AS FORMATID,     RAWTOHEX(gtrid) AS GLOBALID,     RAWTOHEX(bqual) AS BRANCHID     FROM SYS.ALL_VIRTUAL_TRANS_SCHEDULER )__"))) {
       LOG_ERROR("fail to set view_definition", K(ret));
     }
   }
@@ -475,206 +475,6 @@ int ObInnerTableSchema::dba_ob_user_defined_rules_ora_schema(ObTableSchema &tabl
   return ret;
 }
 
-int ObInnerTableSchema::gv_ob_sql_plan_ora_schema(ObTableSchema &table_schema)
-{
-  int ret = OB_SUCCESS;
-  uint64_t column_id = OB_APP_MIN_COLUMN_ID - 1;
-
-  //generated fields:
-  table_schema.set_tenant_id(OB_SYS_TENANT_ID);
-  table_schema.set_tablegroup_id(OB_INVALID_ID);
-  table_schema.set_database_id(OB_ORA_SYS_DATABASE_ID);
-  table_schema.set_table_id(OB_GV_OB_SQL_PLAN_ORA_TID);
-  table_schema.set_rowkey_split_pos(0);
-  table_schema.set_is_use_bloomfilter(false);
-  table_schema.set_progressive_merge_num(0);
-  table_schema.set_rowkey_column_num(0);
-  table_schema.set_load_type(TABLE_LOAD_TYPE_IN_DISK);
-  table_schema.set_table_type(SYSTEM_VIEW);
-  table_schema.set_index_type(INDEX_TYPE_IS_NOT);
-  table_schema.set_def_type(TABLE_DEF_TYPE_INTERNAL);
-
-  if (OB_SUCC(ret)) {
-    if (OB_FAIL(table_schema.set_table_name(OB_GV_OB_SQL_PLAN_ORA_TNAME))) {
-      LOG_ERROR("fail to set table_name", K(ret));
-    }
-  }
-
-  if (OB_SUCC(ret)) {
-    if (OB_FAIL(table_schema.set_compress_func_name(OB_DEFAULT_COMPRESS_FUNC_NAME))) {
-      LOG_ERROR("fail to set compress_func_name", K(ret));
-    }
-  }
-  table_schema.set_part_level(PARTITION_LEVEL_ZERO);
-  table_schema.set_charset_type(ObCharset::get_default_charset());
-  table_schema.set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
-
-  if (OB_SUCC(ret)) {
-    if (OB_FAIL(table_schema.set_view_definition(R"__(SELECT                         SVR_IP,                         SVR_PORT,                         DB_ID,                         SQL_ID,                         PLAN_HASH,                         PLAN_ID,                         GMT_CREATE,                         OPERATION,                         OPTIONS,                         OBJECT_NODE,                         "OBJECT#",                         OBJECT_OWNER,                         OBJECT_NAME,                         OBJECT_ALIAS,                         OBJECT_TYPE,                         OPTIMZIER,                         ID,                         PARENT_ID,                         DEPTH,                         POSITION,                         SEARCH_COLUMNS,                         COST,                         CARDINALITY,                         BYTES,                         ROWSET,                         OTHER_TAG,                         PARTITION_START,                         PARTITION_STOP,                         PARTITION_ID,                         OTHER,                         DISTRIBUTION,                         CPU_COST,                         IO_COST,                         TEMP_SPACE,                         ACCESS_PREDICATES,                         FILTER_PREDICATES,                         STARTUP_PREDICATES,                         PROJECTION,                         SPECIAL_PREDICATES,                         "TIME",                         QBLOCK_NAME,                         REMARKS,                         OTHER_XML                     FROM SYS.ALL_VIRTUAL_SQL_PLAN                     WHERE TENANT_ID = EFFECTIVE_TENANT_ID() )__"))) {
-      LOG_ERROR("fail to set view_definition", K(ret));
-    }
-  }
-  table_schema.set_index_using_type(USING_BTREE);
-  table_schema.set_row_store_type(ENCODING_ROW_STORE);
-  table_schema.set_store_format(OB_STORE_FORMAT_DYNAMIC_MYSQL);
-  table_schema.set_progressive_merge_round(1);
-  table_schema.set_storage_format_version(3);
-  table_schema.set_tablet_id(0);
-
-  table_schema.set_max_used_column_id(column_id);
-  return ret;
-}
-
-int ObInnerTableSchema::v_ob_sql_plan_ora_schema(ObTableSchema &table_schema)
-{
-  int ret = OB_SUCCESS;
-  uint64_t column_id = OB_APP_MIN_COLUMN_ID - 1;
-
-  //generated fields:
-  table_schema.set_tenant_id(OB_SYS_TENANT_ID);
-  table_schema.set_tablegroup_id(OB_INVALID_ID);
-  table_schema.set_database_id(OB_ORA_SYS_DATABASE_ID);
-  table_schema.set_table_id(OB_V_OB_SQL_PLAN_ORA_TID);
-  table_schema.set_rowkey_split_pos(0);
-  table_schema.set_is_use_bloomfilter(false);
-  table_schema.set_progressive_merge_num(0);
-  table_schema.set_rowkey_column_num(0);
-  table_schema.set_load_type(TABLE_LOAD_TYPE_IN_DISK);
-  table_schema.set_table_type(SYSTEM_VIEW);
-  table_schema.set_index_type(INDEX_TYPE_IS_NOT);
-  table_schema.set_def_type(TABLE_DEF_TYPE_INTERNAL);
-
-  if (OB_SUCC(ret)) {
-    if (OB_FAIL(table_schema.set_table_name(OB_V_OB_SQL_PLAN_ORA_TNAME))) {
-      LOG_ERROR("fail to set table_name", K(ret));
-    }
-  }
-
-  if (OB_SUCC(ret)) {
-    if (OB_FAIL(table_schema.set_compress_func_name(OB_DEFAULT_COMPRESS_FUNC_NAME))) {
-      LOG_ERROR("fail to set compress_func_name", K(ret));
-    }
-  }
-  table_schema.set_part_level(PARTITION_LEVEL_ZERO);
-  table_schema.set_charset_type(ObCharset::get_default_charset());
-  table_schema.set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
-
-  if (OB_SUCC(ret)) {
-    if (OB_FAIL(table_schema.set_view_definition(R"__(SELECT                        DB_ID,                       SQL_ID,                       PLAN_HASH,                       PLAN_ID,                       GMT_CREATE,                       OPERATION,                       OPTIONS,                       OBJECT_NODE,                       "OBJECT#",                       OBJECT_OWNER,                       OBJECT_NAME,                       OBJECT_ALIAS,                       OBJECT_TYPE,                       OPTIMZIER,                       ID,                       PARENT_ID,                       DEPTH,                       POSITION,                       SEARCH_COLUMNS,                       COST,                       CARDINALITY,                       BYTES,                       ROWSET,                       OTHER_TAG,                       PARTITION_START,                       PARTITION_STOP,                       PARTITION_ID,                       OTHER,                       DISTRIBUTION,                       CPU_COST,                       IO_COST,                       TEMP_SPACE,                       ACCESS_PREDICATES,                       FILTER_PREDICATES,                       STARTUP_PREDICATES,                       PROJECTION,                       SPECIAL_PREDICATES,                       "TIME",                       QBLOCK_NAME,                       REMARKS,                       OTHER_XML     FROM SYS.GV$OB_SQL_PLAN      WHERE SVR_IP=HOST_IP() AND SVR_PORT=RPC_PORT() )__"))) {
-      LOG_ERROR("fail to set view_definition", K(ret));
-    }
-  }
-  table_schema.set_index_using_type(USING_BTREE);
-  table_schema.set_row_store_type(ENCODING_ROW_STORE);
-  table_schema.set_store_format(OB_STORE_FORMAT_DYNAMIC_MYSQL);
-  table_schema.set_progressive_merge_round(1);
-  table_schema.set_storage_format_version(3);
-  table_schema.set_tablet_id(0);
-
-  table_schema.set_max_used_column_id(column_id);
-  return ret;
-}
-
-int ObInnerTableSchema::gv_ob_plan_real_info_ora_schema(ObTableSchema &table_schema)
-{
-  int ret = OB_SUCCESS;
-  uint64_t column_id = OB_APP_MIN_COLUMN_ID - 1;
-
-  //generated fields:
-  table_schema.set_tenant_id(OB_SYS_TENANT_ID);
-  table_schema.set_tablegroup_id(OB_INVALID_ID);
-  table_schema.set_database_id(OB_ORA_SYS_DATABASE_ID);
-  table_schema.set_table_id(OB_GV_OB_PLAN_REAL_INFO_ORA_TID);
-  table_schema.set_rowkey_split_pos(0);
-  table_schema.set_is_use_bloomfilter(false);
-  table_schema.set_progressive_merge_num(0);
-  table_schema.set_rowkey_column_num(0);
-  table_schema.set_load_type(TABLE_LOAD_TYPE_IN_DISK);
-  table_schema.set_table_type(SYSTEM_VIEW);
-  table_schema.set_index_type(INDEX_TYPE_IS_NOT);
-  table_schema.set_def_type(TABLE_DEF_TYPE_INTERNAL);
-
-  if (OB_SUCC(ret)) {
-    if (OB_FAIL(table_schema.set_table_name(OB_GV_OB_PLAN_REAL_INFO_ORA_TNAME))) {
-      LOG_ERROR("fail to set table_name", K(ret));
-    }
-  }
-
-  if (OB_SUCC(ret)) {
-    if (OB_FAIL(table_schema.set_compress_func_name(OB_DEFAULT_COMPRESS_FUNC_NAME))) {
-      LOG_ERROR("fail to set compress_func_name", K(ret));
-    }
-  }
-  table_schema.set_part_level(PARTITION_LEVEL_ZERO);
-  table_schema.set_charset_type(ObCharset::get_default_charset());
-  table_schema.set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
-
-  if (OB_SUCC(ret)) {
-    if (OB_FAIL(table_schema.set_view_definition(R"__(SELECT                         SVR_IP,                         SVR_PORT,                         SQL_ID,                         PLAN_HASH,                         PLAN_ID,                         ID,                         REAL_COST,                         REAL_CARDINALITY,                         CPU_COST,                         IO_COST                     FROM SYS.ALL_VIRTUAL_PLAN_REAL_INFO                     WHERE TENANT_ID = EFFECTIVE_TENANT_ID() )__"))) {
-      LOG_ERROR("fail to set view_definition", K(ret));
-    }
-  }
-  table_schema.set_index_using_type(USING_BTREE);
-  table_schema.set_row_store_type(ENCODING_ROW_STORE);
-  table_schema.set_store_format(OB_STORE_FORMAT_DYNAMIC_MYSQL);
-  table_schema.set_progressive_merge_round(1);
-  table_schema.set_storage_format_version(3);
-  table_schema.set_tablet_id(0);
-
-  table_schema.set_max_used_column_id(column_id);
-  return ret;
-}
-
-int ObInnerTableSchema::v_ob_plan_real_info_ora_schema(ObTableSchema &table_schema)
-{
-  int ret = OB_SUCCESS;
-  uint64_t column_id = OB_APP_MIN_COLUMN_ID - 1;
-
-  //generated fields:
-  table_schema.set_tenant_id(OB_SYS_TENANT_ID);
-  table_schema.set_tablegroup_id(OB_INVALID_ID);
-  table_schema.set_database_id(OB_ORA_SYS_DATABASE_ID);
-  table_schema.set_table_id(OB_V_OB_PLAN_REAL_INFO_ORA_TID);
-  table_schema.set_rowkey_split_pos(0);
-  table_schema.set_is_use_bloomfilter(false);
-  table_schema.set_progressive_merge_num(0);
-  table_schema.set_rowkey_column_num(0);
-  table_schema.set_load_type(TABLE_LOAD_TYPE_IN_DISK);
-  table_schema.set_table_type(SYSTEM_VIEW);
-  table_schema.set_index_type(INDEX_TYPE_IS_NOT);
-  table_schema.set_def_type(TABLE_DEF_TYPE_INTERNAL);
-
-  if (OB_SUCC(ret)) {
-    if (OB_FAIL(table_schema.set_table_name(OB_V_OB_PLAN_REAL_INFO_ORA_TNAME))) {
-      LOG_ERROR("fail to set table_name", K(ret));
-    }
-  }
-
-  if (OB_SUCC(ret)) {
-    if (OB_FAIL(table_schema.set_compress_func_name(OB_DEFAULT_COMPRESS_FUNC_NAME))) {
-      LOG_ERROR("fail to set compress_func_name", K(ret));
-    }
-  }
-  table_schema.set_part_level(PARTITION_LEVEL_ZERO);
-  table_schema.set_charset_type(ObCharset::get_default_charset());
-  table_schema.set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
-
-  if (OB_SUCC(ret)) {
-    if (OB_FAIL(table_schema.set_view_definition(R"__(SELECT                        SQL_ID,                         PLAN_HASH,                         PLAN_ID,                         ID,                         REAL_COST,                         REAL_CARDINALITY,                         CPU_COST,                         IO_COST     FROM SYS.GV$OB_PLAN_REAL_INFO      WHERE SVR_IP=HOST_IP() AND SVR_PORT=RPC_PORT() )__"))) {
-      LOG_ERROR("fail to set view_definition", K(ret));
-    }
-  }
-  table_schema.set_index_using_type(USING_BTREE);
-  table_schema.set_row_store_type(ENCODING_ROW_STORE);
-  table_schema.set_store_format(OB_STORE_FORMAT_DYNAMIC_MYSQL);
-  table_schema.set_progressive_merge_round(1);
-  table_schema.set_storage_format_version(3);
-  table_schema.set_tablet_id(0);
-
-  table_schema.set_max_used_column_id(column_id);
-  return ret;
-}
-
 int ObInnerTableSchema::v_ob_archive_dest_status_ora_schema(ObTableSchema &table_schema)
 {
   int ret = OB_SUCCESS;
@@ -760,7 +560,7 @@ int ObInnerTableSchema::dba_ob_ls_log_archive_progress_ora_schema(ObTableSchema 
   table_schema.set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
 
   if (OB_SUCC(ret)) {
-    if (OB_FAIL(table_schema.set_view_definition(R"__(   SELECT DEST_ID,          LS_ID,           ROUND_ID,           PIECE_ID,           INCARNATION,           START_SCN,           MIN_LSN,           MAX_LSN,           CHECKPOINT_SCN,           STATUS,           FILE_ID,           FILE_OFFSET,           INPUT_BYTES,           OUTPUT_BYTES    FROM SYS.ALL_VIRTUAL_LS_LOG_ARCHIVE_PROGRESS    WHERE TENANT_ID=EFFECTIVE_TENANT_ID();   )__"))) {
+    if (OB_FAIL(table_schema.set_view_definition(R"__(   SELECT DEST_ID,          LS_ID,          ROUND_ID,          PIECE_ID,          INCARNATION,          START_SCN,          MIN_LSN,          MAX_LSN,          CHECKPOINT_SCN,          STATUS,          FILE_ID,          FILE_OFFSET,          INPUT_BYTES,          OUTPUT_BYTES   FROM SYS.ALL_VIRTUAL_LS_LOG_ARCHIVE_PROGRESS   WHERE TENANT_ID=EFFECTIVE_TENANT_ID();   )__"))) {
       LOG_ERROR("fail to set view_definition", K(ret));
     }
   }

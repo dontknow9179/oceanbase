@@ -186,17 +186,18 @@ int ObXAService::xa_start_for_tm_promotion_(const int64_t flags,
     if (OB_SUCC(ret)) {
       //commit record
       if (OB_FAIL(trans.end(true))) {
+        // NOTE that if fail, do not release tx desc
         TRANS_LOG(WARN, "commit inner table trans failed", K(ret), K(xid));
+        xa_ctx_mgr_.erase_xa_ctx(tx_id);
+        xa_ctx_mgr_.revert_xa_ctx(xa_ctx);
       }
     } else {
       //rollback record
       if (OB_SUCCESS != (tmp_ret = trans.end(false))) {
         TRANS_LOG(WARN, "rollback inner table trans failed", K(tmp_ret), K(xid));
       }
-    }
-
-    if (OB_FAIL(ret)) {
       if (OB_NOT_NULL(xa_ctx)) {
+        xa_ctx_mgr_.erase_xa_ctx(tx_id);
         xa_ctx_mgr_.revert_xa_ctx(xa_ctx);
       }
     }
@@ -317,6 +318,10 @@ int ObXAService::xa_start_for_tm_(const int64_t flags,
     }
     if (OB_FAIL(ret)) {
       TRANS_LOG(WARN, "start trans failed", K(ret), K(tx_id), K(xid));
+      if (OB_SUCCESS != (tmp_ret = MTL(ObTransService*)->abort_tx(*tx_desc,
+        ObTxAbortCause::IMPLICIT_ROLLBACK))) {
+        TRANS_LOG(WARN, "fail to abort transaction", K(tmp_ret), K(tx_id), K(xid));
+      }
       MTL(ObTransService *)->release_tx(*tx_desc);
       tx_desc = NULL;
     } else if (OB_FAIL(insert_xa_record(trans, tenant_id, xid, tx_id, sche_addr, flags))) {
@@ -330,6 +335,10 @@ int ObXAService::xa_start_for_tm_(const int64_t flags,
         TRANS_LOG(WARN, "rollback lock record failed", K(tmp_ret), K(xid));
       }
       // txs_->remove_tx(*tx_desc);
+      if (OB_SUCCESS != (tmp_ret = MTL(ObTransService*)->abort_tx(*tx_desc,
+        ObTxAbortCause::IMPLICIT_ROLLBACK))) {
+        TRANS_LOG(WARN, "fail to abort transaction", K(tmp_ret), K(tx_id), K(xid));
+      }
       MTL(ObTransService *)->release_tx(*tx_desc);
       tx_desc = NULL;
     } else {
@@ -360,19 +369,29 @@ int ObXAService::xa_start_for_tm_(const int64_t flags,
         //commit record
         if (OB_FAIL(trans.end(true))) {
           TRANS_LOG(WARN, "commit inner table trans failed", K(ret), K(xid));
+          const bool need_decrease_ref = true;
+          if (OB_SUCCESS != (tmp_ret = MTL(ObTransService*)->abort_tx(*tx_desc,
+            ObTxAbortCause::IMPLICIT_ROLLBACK))) {
+            TRANS_LOG(WARN, "fail to abort transaction", K(tmp_ret), K(tx_id), K(xid));
+          }
+          xa_ctx->try_exit(need_decrease_ref);
+          xa_ctx_mgr_.revert_xa_ctx(xa_ctx);
+          tx_desc = NULL;
         }
       } else {
         //rollback record
         if (OB_SUCCESS != (tmp_ret = trans.end(false))) {
           TRANS_LOG(WARN, "rollback inner table trans failed", K(tmp_ret), K(xid));
         }
-      }
-
-      if (OB_FAIL(ret)) {
         if (OB_NOT_NULL(xa_ctx)) {
+          xa_ctx_mgr_.erase_xa_ctx(tx_id);
           xa_ctx_mgr_.revert_xa_ctx(xa_ctx);
         }
-        // txs_->remove_tx(*tx_desc);
+        // since tx_desc is not set into xa ctx, release tx desc explicitly
+        if (OB_SUCCESS != (tmp_ret = MTL(ObTransService*)->abort_tx(*tx_desc,
+          ObTxAbortCause::IMPLICIT_ROLLBACK))) {
+          TRANS_LOG(WARN, "fail to abort transaction", K(tmp_ret), K(tx_id), K(xid));
+        }
         MTL(ObTransService *)->release_tx(*tx_desc);
         tx_desc = NULL;
       }
@@ -394,14 +413,12 @@ int ObXAService::xa_start_for_dblink_client(const DblinkDriverProto dblink_type,
     ret =  OB_INVALID_ARGUMENT;
     TRANS_LOG(WARN, "invalid dblink connection", K(ret), KP(dblink_conn), K(dblink_type));
   } else {
-    ObXACtx *xa_ctx = NULL;
+    ObXACtx *xa_ctx = tx_desc->get_xa_ctx();
     ObDBLinkClient *client = NULL;
     bool alloc = false;
     const ObTransID tx_id = tx_desc->get_tx_id();
     const ObXATransID xid = tx_desc->get_xid();
-    if (OB_FAIL(xa_ctx_mgr_.get_xa_ctx(tx_id, alloc, xa_ctx))) {
-      TRANS_LOG(WARN, "get xa ctx failed", K(ret), K(xid), K(tx_id));
-    } else if (NULL == xa_ctx) {
+    if (NULL == xa_ctx) {
       ret = OB_ERR_UNEXPECTED;
       TRANS_LOG(WARN, "unexpected xa context", K(ret), K(xid), K(tx_id));
     } else if (OB_FAIL(xa_ctx->get_dblink_client(dblink_type, dblink_conn, client))) {
@@ -416,7 +433,7 @@ int ObXAService::xa_start_for_dblink_client(const DblinkDriverProto dblink_type,
       } else if (OB_FAIL(ObXAService::generate_xid_with_new_bqual(xid,
               client->get_index(), remote_xid))) {
         TRANS_LOG(WARN, "fail to generate xid", K(ret), K(xid), K(tx_id), K(remote_xid));
-      } else if (OB_FAIL(client->rm_xa_start(remote_xid))) {
+      } else if (OB_FAIL(client->rm_xa_start(remote_xid, tx_desc->get_isolation_level()))) {
         int tmp_ret = OB_SUCCESS;
         if (OB_TMP_FAIL(xa_ctx->remove_dblink_client(client))) {
           ret = tmp_ret;

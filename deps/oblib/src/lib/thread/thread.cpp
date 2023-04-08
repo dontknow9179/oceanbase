@@ -24,13 +24,15 @@
 #include "lib/thread/protected_stack_allocator.h"
 #include "lib/utility/ob_defer.h"
 #include "lib/utility/ob_hang_fatal_error.h"
+#include "lib/utility/ob_tracepoint.h"
 #include "lib/signal/ob_signal_struct.h"
 
 using namespace oceanbase;
 using namespace oceanbase::common;
 using namespace oceanbase::lib;
 
-TLOCAL(Thread *, Thread::current_thread_) = nullptr;
+thread_local int64_t Thread::loop_ts_ = 0;
+thread_local Thread* Thread::current_thread_ = nullptr;
 int64_t Thread::total_thread_count_ = 0;
 
 Thread &Thread::current()
@@ -49,14 +51,15 @@ Thread::Thread(int64_t stack_size)
 
 Thread::Thread(Runnable runnable, int64_t stack_size)
     : pth_(0),
-      pid_(0),
-      tid_(0),
       runnable_(runnable),
 #ifndef OB_USE_ASAN
       stack_addr_(nullptr),
 #endif
       stack_size_(stack_size),
-      stop_(true)
+      stop_(true),
+      join_concurrency_(0),
+      pid_before_stop_(0),
+      tid_before_stop_(0)
 {}
 
 Thread::~Thread()
@@ -125,6 +128,27 @@ int Thread::start(Runnable runnable)
 
 void Thread::stop()
 {
+#ifdef ERRSIM
+  if (!stop_
+      && stack_addr_ != NULL
+      && 0 != (OB_E(EventTable::EN_THREAD_HANG) 0)) {
+    int tid_offset = 720;
+    int tid = *(pid_t*)((char*)pth_ + tid_offset);
+    LOG_WARN_RET(OB_SUCCESS, "stop was ignored", K(tid));
+    return;
+  }
+#endif
+#ifndef OB_USE_ASAN
+  if (!stop_ && stack_addr_ != NULL) {
+    int tid_offset = 720;
+    int pid_offset = 724;
+    int len = (char*)stack_addr_ + stack_size_ - (char*)pth_;
+    if (len >= (max(tid_offset, pid_offset) + sizeof(pid_t))) {
+      tid_before_stop_ = *(pid_t*)((char*)pth_ + tid_offset);
+      pid_before_stop_ = *(pid_t*)((char*)pth_ + pid_offset);
+    }
+  }
+#endif
   stop_ = true;
 }
 
@@ -137,8 +161,8 @@ void Thread::dump_pth() // for debug pthread join faileds
   ssize_t size = 0;
   char path[PATH_SIZE];
   len = (char*)stack_addr_ + stack_size_ - (char*)pth_;
-  snprintf(path, PATH_SIZE, "log/dump_pth.%p.%d", (char*)pth_, (int)tid_);
-  LOG_WARN("dump pth start", K(path), K(pth_), K(tid_), K(len), K(stack_addr_), K(stack_size_));
+  snprintf(path, PATH_SIZE, "log/dump_pth.%p.%d", (char*)pth_, static_cast<pid_t>(syscall(__NR_gettid)));
+  LOG_WARN("dump pth start", K(path), K(pth_), K(len), K(stack_addr_), K(stack_size_));
   if (NULL == (char*)pth_ || len >= stack_size_ || len <= 0) {
     LOG_WARN("invalid member", K(pth_), K(stack_addr_), K(stack_size_));
   } else if ((fd = ::open(path, O_WRONLY | O_CREAT | O_TRUNC,
@@ -161,16 +185,19 @@ void Thread::dump_pth() // for debug pthread join faileds
     ret = OB_IO_ERROR;
     LOG_WARN("fail to close file fd", K(fd), KERRMSG, K(ret));
   } else {
-    LOG_WARN("dump pth done", K(path), K(pth_), K(tid_), K(size));
+    LOG_WARN("dump pth done", K(path), K(pth_), K(size));
   }
 #endif
 }
 
 void Thread::wait()
 {
-  int ret = OB_SUCCESS;
+  int ret = 0;
   if (pth_ != 0) {
-    if (OB_FAIL(pthread_join(pth_, nullptr))) {
+    if (2 <= ATOMIC_AAF(&join_concurrency_, 1)) {
+      abort();
+    }
+    if (0 != (ret = pthread_join(pth_, nullptr))) {
       LOG_ERROR("pthread_join failed", K(ret), K(errno));
 #ifndef OB_USE_ASAN
       dump_pth();
@@ -178,10 +205,10 @@ void Thread::wait()
 #endif
     }
     destroy_stack();
-    pth_ = 0;
-    pid_ = 0;
-    tid_ = 0;
     runnable_ = nullptr;
+    if (1 <= ATOMIC_AAF(&join_concurrency_, -1)) {
+      abort();
+    }
   }
 }
 
@@ -198,11 +225,11 @@ void Thread::destroy()
 
 void Thread::destroy_stack()
 {
-
 #ifndef OB_USE_ASAN
   if (stack_addr_ != nullptr) {
     g_stack_allocer.dealloc(stack_addr_);
     stack_addr_ = nullptr;
+    pth_ = 0;
   }
 #endif
 }
@@ -263,8 +290,6 @@ void* Thread::__th_start(void *arg)
                                        .set_label("ThreadRoot")))) {
         LOG_ERROR("create memory context failed", K(ret));
       } else {
-        th->pid_ = getpid();
-        th->tid_ = static_cast<pid_t>(syscall(__NR_gettid));
         WITH_CONTEXT(*mem_context) {
           try {
             in_try_stmt = true;

@@ -1051,11 +1051,10 @@ static OB_INLINE int common_string_time(const ObExpr &expr,
   int warning = OB_SUCCESS;
   int64_t out_val = 0;
   ObScale res_scale; // useless
-  ObScale time_scale = expr.datum_meta_.scale_;
   // support sqlmode TIME_TRUNCATE_FRACTIONAL
   const ObCastMode cast_mode = expr.extra_;
   bool need_truncate = CM_IS_COLUMN_CONVERT(cast_mode) ? CM_IS_TIME_TRUNCATE_FRACTIONAL(cast_mode) : false;
-  if (CAST_FAIL(ObTimeConverter::str_to_time(in_str, out_val, &res_scale, time_scale, need_truncate))) {
+  if (CAST_FAIL(ObTimeConverter::str_to_time(in_str, out_val, &res_scale, need_truncate))) {
     LOG_WARN("str_to_time failed", K(ret), K(in_str));
   } else {
     SET_RES_TIME(out_val);
@@ -1626,7 +1625,7 @@ static int common_copy_string_zf_to_text_result(const ObExpr &expr,
     } else {
       int64_t zf_len = out_len - src.length();
       if (0 < zf_len) {
-        if (OB_FAIL(str_result.fill(0, 0, zf_len))) {
+        if (OB_FAIL(str_result.fill(0, '0', zf_len))) {
         } else if (OB_FAIL(str_result.lseek(zf_len, 0))) {
         } else { /* do nothing */ };
       }
@@ -1821,7 +1820,7 @@ static int common_json_string(const ObExpr &expr,
     // get json string
     if (OB_FAIL(j_bin.reset_iter())) {
       LOG_WARN("failed to reset json bin iter", K(ret), K(j_bin_str));
-    } else if (CAST_FAIL(j_base->print(j_buf, true, false, 0, true))) {
+    } else if (CAST_FAIL(j_base->print(j_buf, true))) {
       LOG_WARN("fail to convert json to string", K(ret), K(j_bin_str));
       ret = OB_ERR_INVALID_JSON_VALUE_FOR_CAST;
       LOG_USER_ERROR(OB_ERR_INVALID_JSON_VALUE_FOR_CAST);
@@ -2199,11 +2198,7 @@ int cast_inconsistent_types_json(const sql::ObExpr &expr,
   ObObjType in_type = expr.args_[0]->datum_meta_.type_;
   ObObjType out_type = expr.datum_meta_.type_;
   if (CM_IS_IMPLICIT_CAST(expr.extra_)) {
-    if (!expr.is_called_in_sql_) {
-      ret = OB_ERR_INVALID_JSON_TEXT;
-    } else {
-      ret = OB_ERR_INVALID_INPUT;
-    }
+    ret = OB_ERR_INVALID_INPUT;
     LOG_WARN("invalid input in implicit cast", K(ret));
   } else {
     LOG_WARN("inconsistent datatypes", K(ret), K(in_type), K(out_type), K(expr.extra_));
@@ -3241,7 +3236,7 @@ CAST_FUNC_NAME(text, string)
     if (OB_FAIL(instr_iter.init(0, ctx.exec_ctx_.get_my_session(),
                                 is_same_charset ? reinterpret_cast<ObIAllocator *>(&res_alloc) : &temp_allocator))) {
       LOG_WARN("init lob str iter failed ", K(ret), K(in_type));
-    } else if (OB_FAIL(instr_iter.get_full_data(data))) {
+    } else if (OB_FAIL(instr_iter.get_full_data(data, &temp_allocator))) {
       LOG_WARN("init lob str iter failed ", K(ret), K(in_type));
     } else if (lib::is_oracle_mode()
                && ob_is_clob(in_type, in_cs_type)
@@ -3681,11 +3676,7 @@ CAST_FUNC_NAME(number, json)
     ObObjType in_type = expr.args_[0]->datum_meta_.type_;
     if (lib::is_oracle_mode() && !number::ObNumber::is_zero_number(nmb.get_desc())) {
       if (CM_IS_IMPLICIT_CAST(expr.extra_)) {
-        if (!expr.is_called_in_sql_) {
-          ret = OB_ERR_INVALID_JSON_TEXT;
-        } else {
-          ret = OB_ERR_INVALID_INPUT;
-        }
+        ret = OB_ERR_INVALID_INPUT;
         LOG_WARN("invalid input in implicit cast", K(ret));
       } else {
         LOG_WARN("inconsistent datatypes", K(ret), K(in_type), K("json"), K(expr.extra_));
@@ -4929,11 +4920,7 @@ CAST_FUNC_NAME(date, json)
     ObObjType in_type = expr.args_[0]->datum_meta_.type_;
     if (lib::is_oracle_mode() && in_val != 0) {
       if (CM_IS_IMPLICIT_CAST(expr.extra_)) {
-        if (!expr.is_called_in_sql_) {
-          ret = OB_ERR_INVALID_JSON_TEXT;
-        } else {
-          ret = OB_ERR_INVALID_INPUT;
-        }
+        ret = OB_ERR_INVALID_INPUT;
         LOG_WARN("invalid input in implicit cast", K(ret));
       } else {
         LOG_WARN("inconsistent datatypes", K(ret), K(in_type), K("json"), K(expr.extra_));
@@ -6039,11 +6026,7 @@ CAST_FUNC_NAME(time, json)
     ObObjType in_type = expr.args_[0]->datum_meta_.type_;
     if (lib::is_oracle_mode() && in_val != 0) {
       if (CM_IS_IMPLICIT_CAST(expr.extra_)) {
-        if (!expr.is_called_in_sql_) {
-          ret = OB_ERR_INVALID_JSON_TEXT;
-        } else {
-          ret = OB_ERR_INVALID_INPUT;
-        }
+        ret = OB_ERR_INVALID_INPUT;
         LOG_WARN("invalid input in implicit cast", K(ret));
       } else {
         LOG_WARN("inconsistent datatypes", K(ret), K(in_type), K("json"), K(expr.extra_));
@@ -7029,7 +7012,7 @@ CAST_FUNC_NAME(json, raw)
 
     if (OB_FAIL(j_bin.reset_iter())) {
       LOG_WARN("failed to reset json bin iter", K(ret), K(j_bin_str));
-    } else if (CAST_FAIL(j_base->print(j_buf, true, false, 0, true))) {
+    } else if (CAST_FAIL(j_base->print(j_buf, true))) {
       LOG_WARN("fail to convert json to string", K(ret), K(j_bin_str));
       ret = OB_ERR_INVALID_JSON_VALUE_FOR_CAST;
       LOG_USER_ERROR(OB_ERR_INVALID_JSON_VALUE_FOR_CAST);
@@ -7078,7 +7061,7 @@ CAST_FUNC_NAME(json, string)
 
       if (OB_FAIL(j_bin.reset_iter())) {
         LOG_WARN("failed to reset json bin iter", K(ret), K(j_bin_str));
-      } else if (CAST_FAIL(j_base->print(j_buf, true, false, 0, true))) {
+      } else if (CAST_FAIL(j_base->print(j_buf, true))) {
         LOG_WARN("fail to convert json to string", K(ret), K(j_bin_str));
         ret = OB_ERR_INVALID_JSON_VALUE_FOR_CAST;
         LOG_USER_ERROR(OB_ERR_INVALID_JSON_VALUE_FOR_CAST);
@@ -11610,7 +11593,7 @@ int ob_datum_to_ob_time_without_date(const ObDatum &datum, const ObObjType type,
         LOG_WARN("int to ob time without date failed", K(ret));
       } else {
         //mysql中intTC转time时，如果hour超过838，那么time应该为null，而不是最大值。
-        const int64_t time_max_val = TIME_MAX_VAL;    // 838:59:59 .
+        const int64_t time_max_val = TIME_MAX_VAL;    // 838:59:59.
         int64_t value = ObTimeConverter::ob_time_to_time(ob_time);
         if (value > time_max_val) {
           ret = OB_INVALID_DATE_VALUE;
@@ -11672,8 +11655,8 @@ int ob_datum_to_ob_time_without_date(const ObDatum &datum, const ObObjType type,
           LOG_WARN("int to ob time without date failed", K(ret));
         } else {
           if ((!ob_time.parts_[DT_YEAR]) && (!ob_time.parts_[DT_MON]) && (!ob_time.parts_[DT_MDAY])) {
-            //mysql中intTC转time时，如果超过838:59:59.999999，那么time应该为null，而不是最大值。
-            const int64_t time_max_val = TIME_MAX_VAL + 999999;    // 838:59:59.999999 .
+            //mysql中intTC转time时，如果超过838:59:59，那么time应该为null，而不是最大值。
+            const int64_t time_max_val = TIME_MAX_VAL;    // 838:59:59.
             int64_t value = ObTimeConverter::ob_time_to_time(ob_time);
             if(value > time_max_val) {
               ret = OB_INVALID_DATE_VALUE;

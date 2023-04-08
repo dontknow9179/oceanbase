@@ -19,6 +19,7 @@
 #include "storage/ob_i_store.h"
 #include "storage/compaction/ob_tablet_merge_task.h"
 #include "storage/compaction/ob_partition_merge_policy.h"
+#include "storage/compaction/ob_storage_locality_cache.h"
 
 namespace oceanbase
 {
@@ -103,6 +104,13 @@ public:
   void wait();
   bool is_stop() const { return is_stop_; }
   int reload_tenant_config();
+  bool enable_adaptive_compaction() const { return enable_adaptive_compaction_; }
+  int64_t get_error_tablet_cnt() { return ATOMIC_LOAD(&error_tablet_cnt_); }
+  void clear_error_tablet_cnt() { ATOMIC_STORE(&error_tablet_cnt_, 0); }
+  void update_error_tablet_cnt(const int64_t delta_cnt)
+  {
+    (void)ATOMIC_AAF(&error_tablet_cnt_, delta_cnt);
+  }
 
   // major merge status control
   void stop_major_merge();
@@ -194,7 +202,7 @@ private:
   class MediumLoopTask : public common::ObTimerTask
   {
   public:
-    MediumLoopTask() = default;
+    MediumLoopTask() { disable_timeout_check(); }
     virtual ~MediumLoopTask() = default;
     virtual void runTimerTask() override;
   };
@@ -218,10 +226,11 @@ private:
   static const int64_t DEFAULT_HASH_MAP_BUCKET_CNT = 1009;
   static const int64_t DEFAULT_COMPACTION_SCHEDULE_INTERVAL = 30 * 1000 * 1000L; // 30s
   static const int64_t CHECK_WEAK_READ_TS_SCHEDULE_INTERVAL = 10 * 1000 * 1000L; // 10s
-  static const int64_t CHECK_REPORT_SCN_INTERVAL = 2 * 60 * 1000 * 1000L; // 2m, temp solution, change to 10m later
+  static const int64_t CHECK_REPORT_SCN_INTERVAL = 5 * 60 * 1000 * 1000L; // 5m
   static const int64_t ADD_LOOP_EVENT_INTERVAL = 120 * 1000 * 1000L; // 120s
   static const int64_t WAIT_MEDIUM_CHECK_THRESHOLD = 10 * 60 * 1000 * 1000L; // 10m
   static const int64_t PRINT_LOG_INVERVAL = 2 * 60 * 1000 * 1000L; // 2m
+  static const int64_t CHECK_LS_LOCALITY_INTERVAL = 5 * 60 * 1000 * 1000L; // 5m
 private:
   bool is_inited_;
   bool major_merge_status_;
@@ -241,6 +250,9 @@ private:
   MediumLoopTask medium_loop_task_;
   SSTableGCTask sstable_gc_task_;
   ObFastFreezeChecker fast_freeze_checker_;
+  bool enable_adaptive_compaction_;
+  int64_t error_tablet_cnt_; // for diagnose
+  compaction::ObStorageLocalityCache ls_locality_cache_;
 };
 
 } // namespace storage

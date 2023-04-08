@@ -461,6 +461,8 @@ ObOptimizerContext(ObSQLSessionInfo *session_info,
   bool has_trigger() const { return has_trigger_; }
   void set_has_pl_udf(bool v) { has_pl_udf_ = v; }
   bool has_pl_udf() const { return has_pl_udf_; }
+  void set_has_dblink(bool v) { has_dblink_ = v; }
+  bool has_dblink() const { return has_dblink_; }
   void set_has_subquery_in_function_table(bool v) { has_subquery_in_function_table_ = v; }
   bool has_subquery_in_function_table() const { return has_subquery_in_function_table_; }
   bool contain_nested_sql() const { return nested_sql_flags_ > 0; }
@@ -537,6 +539,7 @@ private:
       int8_t has_trigger_                      : 1; //this sql has trigger object
       int8_t has_pl_udf_                       : 1; //this sql has pl user defined function
       int8_t has_subquery_in_function_table_   : 1; //this stmt has function table
+      int8_t has_dblink_                       : 1; //this stmt has dblink table
     };
   };
   bool has_for_update_;

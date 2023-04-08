@@ -342,7 +342,7 @@ public:
   virtual void set_read_only();
   virtual void inc_ref();
   virtual void dec_ref();
-  void set_replay();
+  void wait_pending_write();
   virtual int write_auth(const bool exclusive);
   virtual int write_done();
   virtual int trans_begin();
@@ -432,8 +432,6 @@ public:
   virtual void dec_unsubmitted_cnt() override;
   virtual void inc_unsynced_cnt() override;
   virtual void dec_unsynced_cnt() override;
-  void replay_auth();
-  void replay_done();
   int64_t get_checksum() const { return trans_mgr_.get_checksum(); }
   int64_t get_tmp_checksum() const { return trans_mgr_.get_tmp_checksum(); }
   share::SCN get_checksum_scn() const { return trans_mgr_.get_checksum_scn(); }

@@ -309,6 +309,7 @@ protected:
                              ObSelectStmt *select_stmt);
   int resolve_sys_vars(common::ObArray<ObVarInfo> &sys_vars);
   int check_expr_param(const ObRawExpr &expr);
+  int check_col_param_on_expr(ObRawExpr *expr);
   int resolve_columns_field_list_first(ObRawExpr *&expr, ObArray<ObQualifiedName> &columns, ObSelectStmt* sel_stmt);
   int resolve_columns(ObRawExpr *&expr, common::ObArray<ObQualifiedName> &columns);
   int resolve_qualified_identifier(ObQualifiedName &q_name,
@@ -782,7 +783,8 @@ private:
                                          common::ObString &table_name,
                                          common::ObString &db_name,
                                          ObSynonymChecker &synonym_checker,
-                                         bool is_db_explicit);
+                                         bool is_db_explicit,
+                                         bool &is_synonym_public);
   int add_synonym_version(const common::ObIArray<uint64_t> &synonym_ids);
 
   int find_const_params_for_gen_column(const ObRawExpr &expr);
@@ -838,6 +840,7 @@ private:
   int resolve_pq_distribute_hint(const ParseNode &hint_node, ObOptHint *&opt_hint);
   int resolve_pq_set_hint(const ParseNode &hint_node, ObOptHint *&opt_hint);
   int resolve_join_filter_hint(const ParseNode &join_node, ObOptHint *&opt_hint);
+  int resolve_aggregation_hint(const ParseNode &hint_node, ObOptHint *&hint);
   int resolve_normal_transform_hint(const ParseNode &hint_node, ObTransHint *&hint);
   int resolve_normal_optimize_hint(const ParseNode &hint_node, ObOptHint *&hint);
   int resolve_view_merge_hint(const ParseNode &hint_node, ObTransHint *&hint);

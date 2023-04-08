@@ -98,6 +98,8 @@ public:
   virtual int fill_dag_key(char *buf, const int64_t buf_len) const override;
   virtual lib::Worker::CompatMode get_compat_mode() const override
   { return lib::Worker::CompatMode::MYSQL; }
+  virtual uint64_t get_consumer_group_id() const override
+  { return consumer_group_id_; }
   int create_first_task();
 
   INHERIT_TO_STRING_KV("ObIDag", ObIDag, KP(this), K_(param), K_(result));
@@ -128,6 +130,8 @@ protected:
   int delete_backup_set_ls_files_(const share::ObBackupPath &path); 
   int get_set_ls_path_(share::ObBackupPath &path);
   int get_piece_ls_path(share::ObBackupPath &path);
+  int delete_piece_ls_meta_files_(const share::ObBackupPath &path);
+  int delete_piece_log_files_(const share::ObBackupPath &path);
   int delete_complement_log_(const share::ObBackupPath &path);
   int delete_sys_data_(const share::ObBackupPath &path);
   int delete_major_data_(const share::ObBackupPath &path);

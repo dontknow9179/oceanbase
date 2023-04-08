@@ -694,7 +694,7 @@ int ObTableScanOp::prepare_pushdown_limit_param()
 
   } else if (tsc_rtdef_.has_lookup_limit() || das_ref_.get_das_task_cnt() > 1) {
     //for index back, need to final limit output rows in TableScan operator,
-    //please see me for the reason: https://work.aone.alibaba-inc.com/issue/43232745
+    //please see me for the reason:
     /* for multi-partition scanning, */
     /* the limit operation pushed down to the partition TSC needs to be adjusted */
     /* its rule: */
@@ -880,6 +880,7 @@ OB_INLINE int ObTableScanOp::init_das_scan_rtdef(const ObDASScanCtDef &das_ctdef
   if (MY_SPEC.batch_scan_flag_ || is_lookup) {
     das_rtdef.scan_flag_.scan_order_ = ObQueryFlag::KeepOrder;
   }
+  das_rtdef.scan_flag_.is_lookup_for_4377_ = is_lookup;
   das_rtdef.need_check_output_datum_ = MY_SPEC.need_check_output_datum_;
   das_rtdef.sql_mode_ = my_session->get_sql_mode();
   das_rtdef.stmt_allocator_.set_alloc(&das_ref_.get_das_alloc());
@@ -936,26 +937,28 @@ int ObTableScanOp::update_output_tablet_id()
   const ObDASTabletLoc *data_tablet_loc = MY_SPEC.should_scan_index() ?
       ObDASUtils::get_related_tablet_loc(*scan_result_.get_tablet_loc(), MY_SPEC.ref_table_id_) :
       scan_result_.get_tablet_loc();
-  if (is_vectorized()) {
-    const int64_t batch_size = MY_SPEC.max_batch_size_;
-    if (NULL != MY_SPEC.pdml_partition_id_) {
-      ObExpr *expr = MY_SPEC.pdml_partition_id_;
-      ObDatum *datums = expr->locate_datums_for_update(eval_ctx_, batch_size);
-      for (int64_t i = 0; i < batch_size; i++) {
-        datums[i].set_int(data_tablet_loc->tablet_id_.id());
+  if (OB_NOT_NULL(data_tablet_loc)) {
+    if (is_vectorized()) {
+      const int64_t batch_size = MY_SPEC.max_batch_size_;
+      if (NULL != MY_SPEC.pdml_partition_id_) {
+        ObExpr *expr = MY_SPEC.pdml_partition_id_;
+        ObDatum *datums = expr->locate_datums_for_update(eval_ctx_, batch_size);
+        for (int64_t i = 0; i < batch_size; i++) {
+          datums[i].set_int(data_tablet_loc->tablet_id_.id());
+        }
+        expr->set_evaluated_projected(eval_ctx_);
+        LOG_TRACE("find the partition id expr in pdml table scan", K(ret), KPC(expr), KPC(data_tablet_loc));
       }
-      expr->set_evaluated_projected(eval_ctx_);
-      LOG_TRACE("find the partition id expr in pdml table scan", K(ret), KPC(expr), KPC(data_tablet_loc));
-    }
-  } else {
-    // handle PDML partition id:
-    // if partition id expr in TSC output_exprs,
-    // set the TSC partition id to the corresponding expr frame
-    if (NULL != MY_SPEC.pdml_partition_id_) {
-      ObExpr *expr = MY_SPEC.pdml_partition_id_;
-      expr->locate_datum_for_write(eval_ctx_).set_int(data_tablet_loc->tablet_id_.id());
-      expr->set_evaluated_projected(eval_ctx_);
-      LOG_TRACE("find the partition id expr in pdml table scan", K(ret), KPC(data_tablet_loc));
+    } else {
+      // handle PDML partition id:
+      // if partition id expr in TSC output_exprs,
+      // set the TSC partition id to the corresponding expr frame
+      if (NULL != MY_SPEC.pdml_partition_id_) {
+        ObExpr *expr = MY_SPEC.pdml_partition_id_;
+        expr->locate_datum_for_write(eval_ctx_).set_int(data_tablet_loc->tablet_id_.id());
+        expr->set_evaluated_projected(eval_ctx_);
+        LOG_TRACE("find the partition id expr in pdml table scan", K(ret), KPC(data_tablet_loc));
+      }
     }
   }
   return ret;
@@ -1303,11 +1306,32 @@ int ObTableScanOp::inner_close()
     }
   }
   if (OB_SUCC(ret)) {
+    fill_sql_plan_monitor_info();
+  }
+  if (OB_SUCC(ret)) {
     iter_end_ = false;
     need_init_before_get_row_ = true;
   }
 
   return ret;
+}
+
+void ObTableScanOp::fill_sql_plan_monitor_info()
+{
+  oceanbase::common::ObDiagnoseSessionInfo *di = oceanbase::common::ObDiagnoseSessionInfo::get_local_diagnose_info();
+  if (OB_LIKELY(di)) {
+    // Hope to demostrate:
+    // 1. how many bytes read from io (IO_READ_BYTES)
+    // 2. how many bytes in total (DATA_BLOCK_READ_CNT + INDEX_BLOCK_READ_CNT) * 16K (approximately, many diff for each table)
+    // 3. how many rows processed before filtering (MEMSTORE_READ_ROW_COUNT + SSSTORE_READ_ROW_COUNT)
+    op_monitor_info_.otherstat_1_id_ = ObSqlMonitorStatIds::IO_READ_BYTES;
+    op_monitor_info_.otherstat_2_id_ = ObSqlMonitorStatIds::TOTAL_READ_BYTES;
+    op_monitor_info_.otherstat_3_id_ = ObSqlMonitorStatIds::TOTAL_READ_ROW_COUNT;
+    op_monitor_info_.otherstat_1_value_ = EVENT_GET(ObStatEventIds::IO_READ_BYTES, di);
+    // NOTE: this is not always accurate, as block size change be change from default 16K to any value
+    op_monitor_info_.otherstat_2_value_ = (EVENT_GET(ObStatEventIds::DATA_BLOCK_READ_CNT, di) + EVENT_GET(ObStatEventIds::INDEX_BLOCK_READ_CNT, di)) * 16 * 1024;
+    op_monitor_info_.otherstat_3_value_ = EVENT_GET(ObStatEventIds::MEMSTORE_READ_ROW_COUNT, di) + EVENT_GET(ObStatEventIds::SSSTORE_READ_ROW_COUNT, di);
+  }
 }
 
 int ObTableScanOp::do_init_before_get_row()
@@ -1516,10 +1540,6 @@ int ObTableScanOp::local_iter_rescan()
     for (; OB_SUCC(ret) && !task_iter.is_end(); ++task_iter) {
       ObDASScanOp *scan_op = DAS_SCAN_OP(*task_iter);
       if (MY_SPEC.gi_above_) {
-        ObTableScanParam &scan_param = scan_op->get_scan_param();
-        scan_op->set_tablet_id(MY_INPUT.tablet_loc_->tablet_id_);
-        scan_op->set_ls_id(MY_INPUT.tablet_loc_->ls_id_);
-        scan_op->set_tablet_loc(MY_INPUT.tablet_loc_);
         if (!MY_SPEC.is_index_global_ && MY_CTDEF.lookup_ctdef_ != nullptr) {
           //is local index lookup, need to set the lookup ctdef to the das scan op
           ObDASTableLoc *lookup_table_loc = tsc_rtdef_.lookup_rtdef_->table_loc_;
@@ -1562,7 +1582,11 @@ int ObTableScanOp::local_iter_reuse()
     ObDASScanOp *scan_op = DAS_SCAN_OP(*task_iter);
     bool need_switch_param = (scan_op->get_tablet_loc() != MY_INPUT.tablet_loc_ &&
                                 MY_INPUT.tablet_loc_ != nullptr);
-    scan_op->set_need_switch_param(need_switch_param);
+    if (MY_INPUT.tablet_loc_ != nullptr) {
+      scan_op->set_tablet_id(MY_INPUT.tablet_loc_->tablet_id_);
+      scan_op->set_ls_id(MY_INPUT.tablet_loc_->ls_id_);
+      scan_op->set_tablet_loc(MY_INPUT.tablet_loc_);
+    }
     scan_op->reuse_iter();
   }
   if (OB_FAIL(reuse_table_rescan_allocator())) {
@@ -3249,6 +3273,7 @@ bool ObGlobalIndexLookupOpImpl::need_next_index_batch() const
 int ObGlobalIndexLookupOpImpl::check_lookup_row_cnt()
 {
   int ret = OB_SUCCESS;
+  ObSQLSessionInfo *my_session = GET_MY_SESSION(table_scan_op_->get_exec_ctx());
   if (GCONF.enable_defensive_check()
       && get_lookup_ctdef()->pd_expr_spec_.pushdown_filters_.empty()) {
     if (OB_UNLIKELY(lookup_rowkey_cnt_ != lookup_row_cnt_)
@@ -3257,13 +3282,18 @@ int ObGlobalIndexLookupOpImpl::check_lookup_row_cnt()
       ObString func_name = ObString::make_string("check_lookup_row_cnt");
       LOG_USER_ERROR(OB_ERR_DEFENSIVE_CHECK, func_name.length(), func_name.ptr());
       LOG_ERROR("Fatal Error!!! Catch a defensive error!",
-                K(ret), K_(lookup_rowkey_cnt), K_(lookup_row_cnt));
+                K(ret), K_(lookup_rowkey_cnt), K_(lookup_row_cnt),
+                "index_group_cnt", get_index_group_cnt(),
+                "lookup_group_cnt", get_lookup_group_cnt(),
+                "index_table_id", table_scan_op_->get_tsc_spec().get_ref_table_id(),
+                KPC(my_session->get_tx_desc()));
       //now to dump lookup das task info
       for (DASTaskIter task_iter = das_ref_.begin_task_iter(); !task_iter.is_end(); ++task_iter) {
         ObDASScanOp *das_op = static_cast<ObDASScanOp*>(*task_iter);
         LOG_INFO("dump TableLookup DAS Task range",
                  "scan_range", das_op->get_scan_param().key_ranges_,
-                 "range_array_pos", das_op->get_scan_param().range_array_pos_);
+                 "range_array_pos", das_op->get_scan_param().range_array_pos_,
+                 "tablet_id", das_op->get_tablet_id());
       }
     }
   }

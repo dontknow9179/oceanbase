@@ -90,7 +90,7 @@ void flush_trace()
             }
           }
           INIT_SPAN(span->source_span_);
-          _OBTRACE_LOG(INFO,
+          _FLT_LOG(INFO,
                         TRACE_PATTERN "%s}",
                         UUID_TOSTRING(trace.get_trace_id()),
                         __span_type_mapper[span->span_type_],
@@ -111,7 +111,7 @@ void flush_trace()
         span = next;
       }
     };
-    PRINT_WITH_TRACE_MODE(OBTRACE, INFO, func());
+    PRINT_WITH_TRACE_MODE(FLT, INFO, func());
     trace.offset_ = trace.buffer_size_ / 2;
   }
 }
@@ -325,7 +325,9 @@ ObTrace* ObTrace::get_instance()
     thread_local char default_tls_buffer[MIN_BUFFER_SIZE];
     struct Guard {
       Guard(char* buffer, int64_t size) {
-        IGNORE_RETURN new(buffer) ObTrace(size);
+        if (OB_NOT_NULL(buffer)) {
+          IGNORE_RETURN new(buffer) ObTrace(size);
+        }
       }
     };
     thread_local Guard guard1(default_tsi_buffer, DEFAULT_BUFFER_SIZE);
@@ -411,6 +413,7 @@ ObSpanCtx* ObTrace::begin_span(uint32_t span_type, uint8_t level, bool is_follow
       new_span = freed_span_.remove_last();
       current_span_.add_first(new_span);
       new_span->span_type_ = span_type;
+      new_span->span_id_.high_ = 0;
       new_span->span_id_.low_ = ++seq_;
       new_span->span_id_.high_ = 0;
       new_span->source_span_ = last_active_span_;

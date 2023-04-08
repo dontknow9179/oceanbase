@@ -104,6 +104,7 @@ public:
       logservice::ObLogHandler *log_handler) override;
   virtual int reset_storage_recorder() override;
   virtual int remove_memtables_from_data_checkpoint() override;
+  virtual int set_frozen_for_all_memtables() override;
   DECLARE_VIRTUAL_TO_STRING;
 
 protected:
@@ -136,6 +137,8 @@ private:
                                                 share::SCN start_scn,
                                                 share::SCN snapshot_version);
   int unset_logging_blocked_for_active_memtable(memtable::ObIMemtable *memtable);
+  void unlink_memtable_mgr_and_memtable_(memtable::ObMemtable *memtable);
+  void wait_memtable_mgr_op_cnt_(memtable::ObMemtable *memtable);
 
   DISALLOW_COPY_AND_ASSIGN(ObTabletMemtableMgr);
 
@@ -145,6 +148,7 @@ private:
 private:
   ObLS *ls_; // 8B
   common::SpinRWLock lock_def_; //8B
+  int64_t retry_times_; // 8B
   ObStorageSchemaRecorder schema_recorder_; // 120B
   compaction::ObTabletMediumCompactionInfoRecorder medium_info_recorder_; // 96B
 };

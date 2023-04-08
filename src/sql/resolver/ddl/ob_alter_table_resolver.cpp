@@ -502,7 +502,7 @@ int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("table schema should not be null", K(ret));
       } else if (index_table_schema->is_materialized_view()) {
-        // bug: https://aone.alibaba-inc.com/project/851168/issue/20958982
+        // bug:
         // index_tid_array: 包含index和mv, 这里只需要处理索引即可
         // so do-nothing for mv
       } else if (OB_FAIL(index_table_schema->get_index_name(index_name))) {
@@ -2613,8 +2613,16 @@ int ObAlterTableResolver::resolve_add_primary(const ParseNode &node)
     if (OB_SUCC(ret)) {
       ObAlterTableStmt *alter_table_stmt = get_alter_table_stmt();
       create_index_arg->index_type_ = INDEX_TYPE_PRIMARY;
-      create_index_arg->index_name_.assign_ptr(common::OB_PRIMARY_INDEX_NAME,
-                                               static_cast<int32_t>(strlen(common::OB_PRIMARY_INDEX_NAME)));
+      if (lib::is_oracle_mode()) {
+        if (node.num_child_ == 2 && OB_NOT_NULL(node.children_[1])
+            && node.children_[1]->str_len_ != 0) {
+          create_index_arg->index_name_.assign_ptr(node.children_[1]->str_value_,
+                                                   static_cast<int32_t>(node.children_[1]->str_len_));
+        }
+      } else {
+        create_index_arg->index_name_.assign_ptr(common::OB_PRIMARY_INDEX_NAME,
+                                                 static_cast<int32_t>(strlen(common::OB_PRIMARY_INDEX_NAME)));
+      }
       create_index_arg->tenant_id_ = session_info_->get_effective_tenant_id();
       if (OB_ISNULL(alter_table_stmt)) {
         ret = OB_ERR_UNEXPECTED;
@@ -4123,7 +4131,7 @@ int ObAlterTableResolver::process_timestamp_column(ObColumnResolveStat &stat,
     SQL_RESV_LOG(WARN, "fail to set orig default value for alter table", K(ret), K(cur_default_value));
   } else if (OB_FAIL(session_info_->get_explicit_defaults_for_timestamp(explicit_value))) {
     LOG_WARN("fail to get explicit_defaults_for_timestamp", K(ret));
-  } else if (true == explicit_value) {
+  } else if (true == explicit_value || alter_column_schema.is_generated_column()) {
     //nothing to do
   } else {
     alter_column_schema.check_timestamp_column_order_ = true;
@@ -5110,7 +5118,7 @@ int ObAlterTableResolver::fill_column_schema_according_stat(const ObColumnResolv
   } else if (ObTimestampType == alter_column_schema.get_data_type()) {
     if (OB_FAIL(session_info_->get_explicit_defaults_for_timestamp(explicit_value))) {
       LOG_WARN("fail to get explicit_defaults_for_timestamp", K(ret));
-    } else if (!explicit_value) {
+    } else if (!explicit_value && !alter_column_schema.is_generated_column()) {
       alter_column_schema.check_timestamp_column_order_ = true;
     }
   }

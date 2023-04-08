@@ -2244,10 +2244,16 @@ int ObDelUpdResolver::expand_record_to_columns(const ParseNode &record_node,
         const pl::ObUserDefinedType *user_type = NULL;
         ParseNode *column_node = NULL;
         const ParseNode *member_node = &record_node;
-        while (NULL != member_node && NULL != member_node->children_[1]) {
+        bool multi_level_count = 0;
+        while (NULL != member_node && member_node->num_child_ > 1 && NULL != member_node->children_[1]) {
           member_node = member_node->children_[1];
+          multi_level_count++;
         }
-        if (OB_ISNULL(column_node = new_terminal_node(allocator_, T_IDENT))) {
+        if (multi_level_count > 0) {
+          ret = OB_NOT_SUPPORTED;
+          LOG_WARN("not support to expand", K(composite_type), K(ret));
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "mutil level record reference");
+        } else if (OB_ISNULL(column_node = new_terminal_node(allocator_, T_IDENT))) {
           ret = OB_ALLOCATE_MEMORY_FAILED;
           LOG_WARN("make db name T_IDENT node failed", K(ret));
         } else if (OB_ISNULL(member_node->children_[1] = new_non_terminal_node(allocator_,
@@ -2577,7 +2583,7 @@ int ObDelUpdResolver::build_column_conv_function_with_value_desc(ObInsertTableIn
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("table schema is null", K(ret), K(table_item->ddl_table_id_));
       } else {
-        skip_convert = table_schema->is_index_table() || 
+        skip_convert = table_schema->is_index_table() ||
                        column_item->column_id_ == OB_HIDDEN_PK_INCREMENT_COLUMN_ID;
         LOG_TRACE("skip convert expr in ddl", K(table_item->ddl_table_id_), K(skip_convert));
       }
@@ -2758,6 +2764,7 @@ int ObDelUpdResolver::generate_autoinc_params(ObInsertTableInfo &table_info)
           param.autoinc_col_type_ = column_type;
           param.autoinc_desired_count_ = 0;
           param.autoinc_mode_is_order_ = table_schema->is_order_auto_increment_mode();
+          param.autoinc_version_ = table_schema->get_truncate_version();
           // hidden pk auto-increment variables' default value is 1
           // auto-increment variables for other columns are set in ob_sql.cpp
           // because physical plan may come from plan cache; it need be reset every time
@@ -2794,7 +2801,11 @@ int ObDelUpdResolver::get_value_row_size(uint64_t& value_row_size)
   } else if (del_upd_stmt->is_insert_stmt()) {
     ObInsertStmt *insert_stmt = static_cast<ObInsertStmt*>(del_upd_stmt);
     if (!insert_stmt->value_from_select()) {
-      value_row_size = insert_stmt->get_insert_row_count();
+      if (params_.is_batch_stmt_) {
+        value_row_size = params_.batch_stmt_num_;
+      } else {
+        value_row_size = insert_stmt->get_insert_row_count();
+      }
     }
   }
   return ret;
@@ -2942,6 +2953,7 @@ int ObDelUpdResolver::resolve_insert_values(const ParseNode *node,
   int ret = OB_SUCCESS;
   ObDelUpdStmt *del_upd_stmt = get_del_upd_stmt();
   ObArray<ObRawExpr*> value_row;
+  ObArray<int64_t> value_idxs; //store the old order of columns in values_desc
   uint64_t value_count = OB_INVALID_ID;
   bool is_all_default = false;
   if (OB_ISNULL(del_upd_stmt) || OB_ISNULL(node) || OB_ISNULL(session_info_) ||
@@ -2962,6 +2974,36 @@ int ObDelUpdResolver::resolve_insert_values(const ParseNode *node,
   if (FAILEDx(table_info.values_vector_.reserve(node->num_child_ * table_info.values_desc_.count()))) {
     // works for most cases. except label security/timestamp generation needs extend memory
     LOG_WARN("reserve memory fail", K(ret));
+  }
+  if (OB_SUCC(ret)) {
+    //move generated columns behind basic columns before resolve values
+    ObArray<ObColumnRefRawExpr*> tmp_values_desc;
+    if (OB_FAIL(value_idxs.reserve(table_info.values_desc_.count()))) {
+      LOG_WARN("fail to reserve memory", K(ret));
+    } else if (OB_FAIL(tmp_values_desc.reserve(table_info.values_desc_.count()))) {
+      LOG_WARN("fail to reserve memory", K(ret));
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < 2; ++i) {
+      for (int64_t j = 0; OB_SUCC(ret) && j < table_info.values_desc_.count(); ++j) {
+        if (OB_ISNULL(table_info.values_desc_.at(j))) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("inalid value desc", K(j), K(table_info.values_desc_));
+        } else if ((i == 0 && !table_info.values_desc_.at(j)->is_generated_column())
+                   || (i == 1 && table_info.values_desc_.at(j)->is_generated_column())) {
+          if (OB_FAIL(tmp_values_desc.push_back(table_info.values_desc_.at(j)))) {
+            LOG_WARN("fail to push back values_desc_", K(ret));
+          } else if (OB_FAIL(value_idxs.push_back(j))) {
+            LOG_WARN("fail to push back value index", K(ret));
+          }
+        }
+      }
+    }
+    if (OB_SUCC(ret)) {
+      table_info.values_desc_.reuse();
+      if (OB_FAIL(append(table_info.values_desc_, tmp_values_desc))) {
+        LOG_WARN("fail to append new values_desc");
+      }
+    }
   }
   for (int64_t i = 0; OB_SUCC(ret) && i < node->num_child_; i++) {
     ParseNode *vector_node = node->children_[i];
@@ -2993,17 +3035,18 @@ int ObDelUpdResolver::resolve_insert_values(const ParseNode *node,
           ObRawExpr *expr = NULL;
           ObRawExpr *tmp_expr = NULL;
           const ObColumnRefRawExpr *column_expr = NULL;
-          if (OB_ISNULL(vector_node->children_[j])
+          const ParseNode *value_node = NULL;
+          if (OB_ISNULL(value_node = vector_node->children_[value_idxs.at(j)])
               || OB_ISNULL(column_expr = table_info.values_desc_.at(j))) {
             ret = OB_ERR_UNEXPECTED;
             LOG_ERROR("inalid children node", K(j), K(vector_node));
-          } else if (T_EMPTY == vector_node->children_[j]->type_) {
+          } else if (T_EMPTY == value_node->type_) {
             //nothing todo
           } else {
             uint64_t column_id = column_expr->get_column_id();
             ObDefaultValueUtils utils(del_upd_stmt, &params_, this);
             bool is_generated_column = false;
-            if (OB_FAIL(resolve_sql_expr(*(vector_node->children_[j]), expr))) {
+            if (OB_FAIL(resolve_sql_expr(*value_node, expr))) {
               LOG_WARN("resolve sql expr failed", K(ret));
             } else if (OB_ISNULL(expr)) {
               ret = OB_ERR_UNEXPECTED;
@@ -3196,7 +3239,7 @@ int ObDelUpdResolver::build_row_for_empty_brackets(ObArray<ObRawExpr*> &value_ro
         }
       } else if (item->is_auto_increment()) {
         // insert into t (..) values (); 场景下不可以自动生成 nextval 表达式，而应该生成 null
-        // 否则会出现问题：https://work.aone.alibaba-inc.com/issue/27172629
+        // 否则会出现问题：
         if (OB_FAIL(ObRawExprUtils::build_null_expr(*params_.expr_factory_, expr))) {
           LOG_WARN("failed to build next_val expr as null", K(ret));
         } else if (OB_FAIL(value_row.push_back(expr))) {
@@ -4001,12 +4044,12 @@ int ObDelUpdResolver::add_relation_columns(ObIArray<ObTableAssignment> &table_as
         }
       }
     }
-    
+
   }
   return ret;
 }
 
-int ObDelUpdResolver::replace_column_ref(ObArray<ObRawExpr*> *value_row, 
+int ObDelUpdResolver::replace_column_ref(ObArray<ObRawExpr*> *value_row,
                                         ObRawExpr *&expr,
                                         bool in_generated_column)
 {

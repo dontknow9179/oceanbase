@@ -154,6 +154,7 @@ ObServer::ObServer()
     bandwidth_throttle_(),
     sys_bkgd_net_percentage_(0),
     ethernet_speed_(0),
+    cpu_frequency_(DEFAULT_CPU_FREQUENCY),
     session_mgr_(),
     root_service_monitor_(root_service_, rs_mgr_),
     ob_service_(gctx_),
@@ -171,6 +172,7 @@ ObServer::ObServer()
     ctas_clean_up_task_(),
     refresh_active_time_task_(),
     refresh_network_speed_task_(),
+    refresh_cpu_frequency_task_(),
     schema_status_proxy_(sql_proxy_),
     is_log_dir_empty_(false),
     conn_res_mgr_(),
@@ -373,6 +375,8 @@ int ObServer::init(const ObServerOptions &opts, const ObPLogWriterCfg &log_cfg)
       LOG_ERROR("init refresh active time task failed", KR(ret));
     } else if (OB_FAIL(init_refresh_network_speed_task())) {
       LOG_ERROR("init refresh network speed task failed", KR(ret));
+    } else if (OB_FAIL(init_refresh_cpu_frequency())) {
+      LOG_ERROR("init refresh cpu frequency failed", KR(ret));
     } else if (OB_FAIL(init_collect_info_gc_task())) {
       LOG_ERROR("init collect info gc task failed", KR(ret));
     } else if (OB_FAIL(ObOptStatManager::get_instance().init(
@@ -389,8 +393,8 @@ int ObServer::init(const ObServerOptions &opts, const ObPLogWriterCfg &log_cfg)
       LOG_ERROR("init table store stat mgr failed", KR(ret));
     } else if (OB_FAIL(ObCompatModeGetter::instance().init(&sql_proxy_))) {
       LOG_ERROR("init get compat mode server failed",KR(ret));
-    } else if (OB_FAIL(table_service_.init(gctx_))) {
-    LOG_ERROR("init table service failed", KR(ret));
+    } else if (OB_FAIL(table_service_.init())) {
+      LOG_ERROR("init table service failed", KR(ret));
     } else if (OB_FAIL(ObTimerMonitor::get_instance().init())) {
       LOG_ERROR("init timer monitor failed", KR(ret));
     } else if (OB_FAIL(ObBGThreadMonitor::get_instance().init())) {
@@ -534,6 +538,10 @@ void ObServer::destroy()
     disk_usage_report_task_.destroy();
     FLOG_INFO("tenant disk usage report task destroyed");
 
+    FLOG_INFO("begin to destroy tmp file manager");
+    ObTmpFileManager::get_instance().destroy();
+    FLOG_INFO("tmp file manager destroyed");
+
     FLOG_INFO("begin to destroy ob server block mgr");
     OB_SERVER_BLOCK_MGR.destroy();
     FLOG_INFO("ob server block mgr destroyed");
@@ -541,10 +549,6 @@ void ObServer::destroy()
     FLOG_INFO("begin to destroy store cache");
     OB_STORE_CACHE.destroy();
     FLOG_INFO("store cache destroyed");
-
-    FLOG_INFO("begin to destroy tmp file manager");
-    ObTmpFileManager::get_instance().destroy();
-    FLOG_INFO("tmp file manager destroyed");
 
     FLOG_INFO("begin to destroy ObDagWarningHistoryManager");
     ObDagWarningHistoryManager::get_instance().destroy();
@@ -970,6 +974,10 @@ int ObServer::stop()
     FLOG_INFO("begin to stop server blacklist");
     TG_STOP(lib::TGDefIDs::Blacklist);
     FLOG_INFO("server blacklist stopped");
+
+    FLOG_INFO("begin to stop ObNetKeepAlive");
+    ObNetKeepAlive::get_instance().stop();
+    FLOG_INFO("ObNetKeepAlive stopped");
 
     FLOG_INFO("begin to stop GDS");
     GDS.stop();
@@ -1550,7 +1558,6 @@ int ObServer::init_config()
       }
     }
   }
-  get_unis_global_compat_version() = GET_MIN_CLUSTER_VERSION();
   lib::g_runtime_enabled = true;
 
   return ret;
@@ -1638,7 +1645,7 @@ int ObServer::init_pre_setting()
   if (OB_SUCC(ret)) {
     const int64_t stack_size = std::max(1L << 19, static_cast<int64_t>(GCONF.stack_size));
     LOG_INFO("set stack_size", K(stack_size));
-    global_thread_stack_size = lib::ProtectedStackAllocator::adjust_size(stack_size) - SIG_STACK_SIZE;
+    global_thread_stack_size = stack_size - SIG_STACK_SIZE - ACHUNK_PRESERVE_SIZE;
   }
   return ret;
 }
@@ -2784,6 +2791,63 @@ void ObServer::ObRefreshNetworkSpeedTask::runTimerTask()
   }
 }
 
+ObServer::ObRefreshCpuFreqTimeTask::ObRefreshCpuFreqTimeTask()
+: obs_(nullptr), is_inited_(false)
+{}
+
+int ObServer::ObRefreshCpuFreqTimeTask::init(ObServer *obs, int tg_id)
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(is_inited_)) {
+    ret = OB_INIT_TWICE;
+    LOG_ERROR("ObRefreshCpuFreqTimeTask has already been inited", KR(ret));
+  } else if (OB_ISNULL(obs)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_ERROR("ObRefreshCpuFreqTimeTask init with null ptr", KR(ret), K(obs));
+  } else {
+    obs_ = obs;
+    is_inited_ = true;
+    if (OB_FAIL(TG_SCHEDULE(tg_id, *this, REFRESH_INTERVAL, true /*schedule repeatly*/))) {
+      LOG_ERROR("fail to schedule task ObRefreshCpuFreqTimeTask", KR(ret));
+    }
+  }
+  return ret;
+}
+
+void ObServer::ObRefreshCpuFreqTimeTask::destroy()
+{
+  is_inited_ = false;
+  obs_ = nullptr;
+}
+
+void ObServer::ObRefreshCpuFreqTimeTask::runTimerTask()
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(!is_inited_)) {
+    ret = OB_NOT_INIT;
+    LOG_ERROR("ObRefreshCpuFreqTimeTask has not been inited", KR(ret));
+  } else if (OB_ISNULL(obs_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_ERROR("ObRefreshCpuFreqTimeTask task got null ptr", KR(ret));
+  } else if (OB_FAIL(obs_->refresh_cpu_frequency())) {
+    LOG_ERROR("ObRefreshCpuFreqTimeTask task failed", KR(ret));
+  }
+}
+
+int ObServer::refresh_cpu_frequency()
+{
+  int ret = OB_SUCCESS;
+  uint64_t cpu_frequency = get_cpufreq_khz();
+
+  cpu_frequency = cpu_frequency < 1 ? 1 : cpu_frequency;
+  if (cpu_frequency != cpu_frequency_) {
+    LOG_INFO("Cpu frequency changed", "from", cpu_frequency_, "to", cpu_frequency);
+    cpu_frequency_ = cpu_frequency;
+  }
+
+  return ret;
+}
+
 void ObServer::ObCollectInfoGCTask::runTimerTask()
 {
   int ret = OB_SUCCESS;
@@ -2864,6 +2928,15 @@ int ObServer::init_refresh_network_speed_task()
   return ret;
 }
 
+int ObServer::init_refresh_cpu_frequency()
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(refresh_cpu_frequency_task_.init(this, lib::TGDefIDs::ServerGTimer))) {
+    LOG_ERROR("fail to init refresh cpu frequency task", KR(ret));
+  }
+  return ret;
+}
+
 int ObServer::init_collect_info_gc_task()
 {
   int ret = OB_SUCCESS;
@@ -2912,15 +2985,15 @@ int ObServer::clean_up_invalid_tables_by_tenant(
   int tmp_ret = OB_SUCCESS;
   ObSchemaGetterGuard schema_guard;
   const ObDatabaseSchema *database_schema = NULL;
-  ObSEArray<const ObTableSchema *, 512> table_schemas;
   const int64_t CONNECT_TIMEOUT_VALUE = 50L * 60L * 60L * 1000L * 1000L; //default value is 50hrs
+  ObArray<uint64_t> table_ids;
   obrpc::ObDropTableArg drop_table_arg;
   obrpc::ObTableItem table_item;
   obrpc::ObCommonRpcProxy *common_rpc_proxy = NULL;
   char create_host_str[OB_MAX_HOST_NAME_LENGTH];
   if (OB_FAIL(schema_service_.get_tenant_schema_guard(tenant_id, schema_guard))) {
     LOG_WARN("fail to get schema guard", K(ret));
-  } else if (OB_FAIL(schema_guard.get_table_schemas_in_tenant(tenant_id, table_schemas))) {
+  } else if (OB_FAIL(schema_guard.get_table_ids_in_tenant(tenant_id, table_ids))) {
     LOG_WARN("fail to get table schema", K(ret), K(tenant_id));
   } else {
     ObCTASCleanUp ctas_cleanup(this, true);
@@ -2928,11 +3001,19 @@ int ObServer::clean_up_invalid_tables_by_tenant(
     drop_table_arg.to_recyclebin_ = false;
     common_rpc_proxy = GCTX.rs_rpc_proxy_;
     MYADDR.ip_port_to_string(create_host_str, OB_MAX_HOST_NAME_LENGTH);
-    for (int64_t i = 0; i < table_schemas.count() && OB_SUCC(tmp_ret); i++) {
+    // only OB_ISNULL(GCTX.session_mgr_) will exit the loop
+    for (int64_t i = 0; i < table_ids.count() && OB_SUCC(tmp_ret); i++) {
       bool is_oracle_mode = false;
-      const ObTableSchema * table_schema = table_schemas.at(i);
-      if (OB_ISNULL(table_schema)) {
-        ret = OB_ERR_UNEXPECTED;
+      const ObTableSchema *table_schema = NULL;
+      const uint64_t table_id = table_ids.at(i);
+      // schema guard cannot be used repeatedly in iterative logic,
+      // otherwise it will cause a memory hike in schema cache
+      if (OB_FAIL(schema_service_.get_tenant_schema_guard(tenant_id, schema_guard))) {
+        LOG_WARN("get schema guard failed", K(ret), K(tenant_id));
+      } else if (OB_FAIL(schema_guard.get_table_schema(tenant_id, table_id, table_schema))) {
+        LOG_WARN("get table schema failed", K(ret), KT(table_id));
+      } else if (OB_ISNULL(table_schema)) {
+        ret = OB_TABLE_NOT_EXIST;
         LOG_WARN("got invalid schema", KR(ret), K(i));
       } else if (OB_FAIL(table_schema->check_if_oracle_compat_mode(is_oracle_mode))) {
         LOG_WARN("fail to check table if oracle compat mode", KR(ret));

@@ -177,14 +177,10 @@ public:
                               ObStmtMapInfo& map_info,
                               ObStmtMapInfo& common_map_info);
 
-  int create_spj(ObSelectStmt *parent_stmt);
-
   int pushdown_conditions(ObSelectStmt *parent_stmt,
                         const ObIArray<int64_t> &cond_map,
                         const ObIArray<int64_t> &common_cond_map,
                         ObIArray<ObRawExpr*> &pushdown_exprs);
-
-  int pushdown_group_by(ObSelectStmt *parent_stmt, ObIArray<ObRawExpr*> &pushdown_exprs);
 
   int pushdown_having_conditions(ObSelectStmt *parent_stmt,
                               const ObIArray<int64_t> &having_map,

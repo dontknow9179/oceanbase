@@ -210,6 +210,8 @@ private:
     MetaInfo();
     ~MetaInfo();
 
+    TO_STRING_KV(K_(num), K_(head), K_(tail));
+
     int get(const int64_t target_version, Type *&meta);
     int set(const int64_t version, Type *meta);
   };
@@ -409,6 +411,10 @@ private:
       const char *table_name,
       const int64_t non_hidden_column_cnt,
       TableSchemaInfo &tb_schema_info);
+  int try_erase_table_schema_(
+      const uint64_t tenant_id,
+      const uint64_t table_id,
+      const int64_t version);
 
 private:
   bool                  inited_;

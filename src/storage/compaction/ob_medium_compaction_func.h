@@ -38,7 +38,7 @@ public:
       ObLS &ls,
       ObTablet &tablet,
       const int64_t major_frozen_scn = 0,
-      const bool schedule_with_memtable = false);
+      const bool scheduler_called = false);
   static int get_latest_storage_schema_from_memtable(
     ObIAllocator &allocator,
     const ObIArray<ObITable *> &memtables,
@@ -60,12 +60,15 @@ public:
       const bool is_major,
       const ObAdaptiveMergePolicy::AdaptiveMergeReason merge_reason = ObAdaptiveMergePolicy::AdaptiveMergeReason::NONE);
 
-  int check_medium_finish();
+  int check_medium_finish(const ObLSLocality &ls_locality);
 
   int64_t to_string(char* buf, const int64_t buf_len) const;
 
 protected:
-  int get_status_from_inner_table(share::ObTabletCompactionScnInfo &ret_info);
+  static int get_status_from_inner_table(
+      const ObLSID &ls_id,
+      const ObTabletID &tablet_id,
+      share::ObTabletCompactionScnInfo &ret_info);
   int prepare_medium_info(const ObGetMergeTablesResult &result, ObMediumCompactionInfo &medium_info);
   int init_parallel_range(
       const ObGetMergeTablesResult &result,
@@ -82,6 +85,7 @@ protected:
       const int64_t medium_snapshot,
       const share::ObLSID &ls_id,
       const ObTabletID &tablet_id,
+      const ObLSLocality &ls_locality,
       bool &merge_finish);
   int init_tablet_filters();
   static int check_medium_checksum_table(

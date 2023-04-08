@@ -962,10 +962,11 @@ int ObMPStmtExecute::execute_response(ObSQLSessionInfo &session,
                                       bool &is_diagnostics_stmt,
                                       int64_t &execution_id,
                                       const bool force_sync_resp,
-                                      bool &async_resp_used)
+                                      bool &async_resp_used,
+                                      ObPsStmtId &inner_stmt_id)
 {
   int ret = OB_SUCCESS;
-  ObPsStmtId inner_stmt_id = OB_INVALID_ID;
+  inner_stmt_id = OB_INVALID_ID;
   ObIAllocator &alloc = CURRENT_CONTEXT->get_arena_allocator();
   if (OB_ISNULL(session.get_ps_cache())) {
     ret = OB_ERR_UNEXPECTED;
@@ -1103,6 +1104,7 @@ int ObMPStmtExecute::do_process(ObSQLSessionInfo &session,
   ObAuditRecordData &audit_record = session.get_raw_audit_record();
   audit_record.try_cnt_++;
   bool is_diagnostics_stmt = false;
+  ObPsStmtId inner_stmt_id = OB_INVALID_ID;
   bool need_response_error = is_arraybinding_ ? false : true;
   const bool enable_perf_event = lib::is_diagnose_info_enabled();
   const bool enable_sql_audit =
@@ -1165,7 +1167,8 @@ int ObMPStmtExecute::do_process(ObSQLSessionInfo &session,
                                         is_diagnostics_stmt,
                                         execution_id,
                                         force_sync_resp,
-                                        async_resp_used);
+                                        async_resp_used,
+                                        inner_stmt_id);
           } else {
             ret = execute_response(session,
                                     result,
@@ -1174,7 +1177,8 @@ int ObMPStmtExecute::do_process(ObSQLSessionInfo &session,
                                     is_diagnostics_stmt,
                                     execution_id,
                                     force_sync_resp,
-                                    async_resp_used);
+                                    async_resp_used,
+                                    inner_stmt_id);
           }
           if ((OB_SUCC(ret) && is_diagnostics_stmt) || async_resp_used) {
             // if diagnostic stmt succeed, no need to clear warning buf.
@@ -1257,6 +1261,7 @@ int ObMPStmtExecute::do_process(ObSQLSessionInfo &session,
       audit_record.sql_len_ = min(ctx_.cur_sql_.length(), OB_MAX_SQL_LENGTH);
       audit_record.sql_cs_type_ = session.get_local_collation_connection();
       audit_record.ps_stmt_id_ = stmt_id_;
+      audit_record.ps_inner_stmt_id_ = inner_stmt_id;
       audit_record.params_value_ = params_value_;
       audit_record.params_value_len_ = params_value_len_;
 
@@ -1289,6 +1294,13 @@ int ObMPStmtExecute::do_process(ObSQLSessionInfo &session,
               table_row_count_list);
           plan->update_cache_access_stat(audit_record.table_scan_stat_);
         } else if (ctx_.self_add_plan_ && !ctx_.plan_cache_hit_) {
+          plan->update_plan_stat(audit_record,
+              true,
+              result.get_exec_context().get_is_evolution(),
+              table_row_count_list);
+          plan->update_cache_access_stat(audit_record.table_scan_stat_);
+        } else if (ctx_.self_add_plan_ && ctx_.plan_cache_hit_) {
+          // spm evolution plan first execute
           plan->update_plan_stat(audit_record,
               true,
               result.get_exec_context().get_is_evolution(),
@@ -1531,17 +1543,23 @@ int ObMPStmtExecute::try_batch_multi_stmt_optimization(ObSQLSessionInfo &session
     LOG_WARN("fail to trans_form extend type params_store", K(ret), K(arraybinding_size_));
   } else if (OB_FAIL(do_process_single(session, array_binding_params, has_more_result, force_sync_resp, async_resp_used))) {
     // 调用do_single接口
-    if (OB_BATCHED_MULTI_STMT_ROLLBACK == ret) {
+    if (THIS_WORKER.need_retry()) {
+      // just go back to large query queue and retry
+    } else if (OB_BATCHED_MULTI_STMT_ROLLBACK == ret) {
       LOG_TRACE("batched multi_stmt needs rollback", K(ret));
       ret = OB_SUCCESS;
     } else {
-      LOG_WARN("failed to process single stmt", K(ret));
+      // 无论什么报错，都走单行执行一次，用于容错
+      int ret_tmp = ret;
+      ret = OB_SUCCESS;
+      LOG_WARN("failed to process batch stmt, cover the error code, reset retry flag, then execute with single row",
+          K(ret_tmp), K(ret), K(THIS_WORKER.need_retry()));
     }
   } else {
     optimization_done = true;
   }
   LOG_TRACE("after try batched multi-stmt optimization", K(ret), K(stmt_type_), K(use_plan_cache),
-      K(optimization_done), K(enable_batch_opt), K(is_ab_returning), K(arraybinding_size_));
+      K(optimization_done), K(enable_batch_opt), K(is_ab_returning), K(THIS_WORKER.need_retry()), K(arraybinding_size_));
   return ret;
 }
 
@@ -1970,6 +1988,7 @@ int ObMPStmtExecute::parse_complex_param_value(ObIAllocator &allocator,
   OZ (pl_type->deserialize(*(ctx_.schema_guard_), allocator, charset, cs_type, ncs_type,
         tz_info, data, reinterpret_cast<char *>(param.get_ext()), param_size,
         param_pos));
+  OX (param.set_need_to_check_extend_type(true));
   return ret;
 }
 
@@ -2026,7 +2045,7 @@ int ObMPStmtExecute::parse_basic_param_value(ObIAllocator &allocator,
         } else if (FALSE_IT(buf_len = ob_gcvt_strict(value, OB_GCVT_ARG_DOUBLE, alloc_size,
                                                      buf, NULL, TRUE/*is_oracle_mode*/,
                                                      FALSE/*is_binary_double*/, FALSE))) {
-        } else if (OB_FAIL(nb.from(buf, buf_len, allocator))) {
+        } else if (OB_FAIL(nb.from_sci_opt(buf, buf_len, allocator))) {
           LOG_WARN("decode double param to number failed", K(ret));
         } else {
           param.set_number(nb);
@@ -2195,16 +2214,31 @@ int ObMPStmtExecute::parse_basic_param_value(ObIAllocator &allocator,
               } else {
                 param.set_collation_type(cs_type);
               }
-              if (is_lob_v1) {
+              ObLobLocatorV2 lobv2(str);
+              if (lobv2.is_lob_locator_v1()) {
                 const ObLobLocator &lob = *(reinterpret_cast<const ObLobLocator *>(dst.ptr()));
-                param.set_lob_locator(lob);
-                param.set_has_lob_header();
-                LOG_TRACE("get lob locator", K(lob), K(cs_type), K(type));
+                if (!IS_CLUSTER_VERSION_BEFORE_4_1_0_0 && lob.get_payload_length() == 0) {
+                  // do convert empty lob v1 to v2
+                  ObString payload;
+                  if (OB_FAIL(lob.get_payload(payload))) {
+                    LOG_WARN("fail to get payload", K(ret), K(lob));
+                  } else {
+                    param.set_lob_value(ObLongTextType, payload.ptr(), payload.length());
+                    if (OB_FAIL(ObTextStringResult::ob_convert_obj_temporay_lob(param, allocator))) {
+                      LOG_WARN("Fail to convert plain lob data to templob",K(ret), K(payload));
+                    } else {
+                      LOG_TRACE("convert empty lob v1 to v2", K(lob), K(cs_type), K(type));
+                    }
+                  }
+                } else {
+                  param.set_lob_locator(lob);
+                  param.set_has_lob_header();
+                  LOG_TRACE("get lob locator", K(lob), K(cs_type), K(type));
+                }
               } else {
-                ObLobLocatorV2 lob(str);
                 param.set_lob_value(ObLongTextType, dst.ptr(), dst.length());
                 param.set_has_lob_header();
-                LOG_TRACE("get lob locator v2", K(lob), K(cs_type), K(type));
+                LOG_TRACE("get lob locator v2", K(lobv2), K(cs_type), K(type));
               }
             } else if (MYSQL_TYPE_TINY_BLOB == type
                       || MYSQL_TYPE_MEDIUM_BLOB == type

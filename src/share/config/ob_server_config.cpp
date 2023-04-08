@@ -238,7 +238,7 @@ int ObServerMemoryConfig::reload_config(const ObServerConfig& server_config)
       system_memory = int64_t(15 + 3 * (sqrt(memory_limit_g) - 8)) << 30;
     }
   }
-  if (memory_limit < get_phy_mem_size() && memory_limit > system_memory) {
+  if (memory_limit > system_memory) {
     memory_limit_ = memory_limit;
     system_memory_ = system_memory;
     LOG_INFO("update memory_limit or system_memory success",
@@ -298,7 +298,7 @@ int ObServerConfig::serialize_(char *buf, const int64_t buf_len, int64_t &pos) c
 int ObServerConfig::serialize(char *buf, const int64_t buf_len, int64_t &pos) const
 {
   int ret = OB_SUCCESS;
-  SERIALIZE_HEADER(UNIS_VERSION);
+  OB_UNIS_ENCODE(UNIS_VERSION);
   if (OB_SUCC(ret)) {
     int64_t size_nbytes = NS_::OB_SERIALIZE_SIZE_NEED_BYTES;
     int64_t pos_bak = (pos += size_nbytes);
@@ -363,6 +363,11 @@ OB_DEF_SERIALIZE_SIZE(ObServerConfig)
 }
 
 } // end of namespace common
+namespace obrpc {
+bool enable_pkt_nio() {
+  return GCONF._enable_pkt_nio && GET_MIN_CLUSTER_VERSION() >= CLUSTER_VERSION_4_1_0_0;
+}
+}
 } // end of namespace oceanbase
 
 namespace easy

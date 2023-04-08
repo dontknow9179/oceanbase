@@ -82,6 +82,12 @@ OB_INLINE bool store_class_might_contain_lob_locator(const ObObjTypeStoreClass s
   return (sc == ObTextSC || sc == ObLobSC || sc == ObJsonSC || sc == ObGeometrySC);
 }
 
+OB_INLINE bool is_var_length_type(const ObObjTypeStoreClass sc)
+{
+  return (sc == ObNumberSC || sc == ObStringSC || sc == ObTextSC
+      || sc == ObLobSC || sc == ObJsonSC || sc == ObGeometrySC);
+}
+
 OB_INLINE ObObjTypeStoreClass *get_store_class_map()
 {
   static ObObjTypeStoreClass store_class_map[] = {
@@ -644,7 +650,7 @@ public:
       const int64_t page_size = common::OB_MALLOC_MIDDLE_BLOCK_SIZE)
     : allocator_(label, page_size), buf_size_limit_(0), alloc_size_(0), alloc_buf_(nullptr) {}
   virtual ~ObEncodingRowBufHolder() {}
-  int init(const int64_t macro_block_size);
+  int init(const int64_t macro_block_size, const int64_t tenant_id = OB_SERVER_TENANT_ID);
   void reset();
   // try to re-alloc held memory buffer
   int try_alloc(const int64_t required_size);

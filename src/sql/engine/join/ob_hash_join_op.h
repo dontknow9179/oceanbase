@@ -21,6 +21,7 @@
 #include "lib/container/ob_2d_array.h"
 #include "sql/engine/aggregate/ob_exec_hash_struct.h"
 #include "lib/lock/ob_scond.h"
+#include "sql/engine/aggregate/ob_adaptive_bypass_ctrl.h"
 
 namespace oceanbase
 {
@@ -1108,7 +1109,6 @@ private:
   static const int64_t CACHE_AWARE_PART_CNT = 128;
   static const int64_t BATCH_RESULT_SIZE = 512;
   static const int64_t INIT_LTB_SIZE = 64;
-  static const int64_t INIT_L2_CACHE_SIZE = 1 * 1024 * 1024; // 1M
   static const int64_t MIN_PART_COUNT = 8;
   static const int64_t PAGE_SIZE = ObChunkDatumStore::BLOCK_SIZE;
   static const int64_t MIN_MEM_SIZE = (MIN_PART_COUNT + 1) * PAGE_SIZE;
@@ -1185,7 +1185,7 @@ private:
   common::ObIAllocator *alloc_; // for buckets
   ModulePageAllocator *bloom_filter_alloc_;
   ObGbyBloomFilter *bloom_filter_;
-  common::ObBitSet<common::OB_DEFAULT_BITSET_SIZE, common::ModulePageAllocator, true>
+  common::ObBitSet<common::OB_DEFAULT_BITSET_SIZE, common::ModulePageAllocator>
                                                                                     right_bit_set_;
   int64_t nth_right_row_;
   int64_t ltb_size_;

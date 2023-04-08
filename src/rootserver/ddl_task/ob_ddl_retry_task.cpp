@@ -155,6 +155,7 @@ int ObDDLRetryTask::init(const uint64_t tenant_id,
                          const int64_t task_id,
                          const uint64_t object_id,
                          const int64_t schema_version,
+                         const int64_t consumer_group_id,
                          const share::ObDDLType &ddl_type,
                          const obrpc::ObDDLArg *ddl_arg, 
                          const int64_t task_status)
@@ -181,6 +182,7 @@ int ObDDLRetryTask::init(const uint64_t tenant_id,
     object_id_ = object_id;
     target_object_id_ = object_id;
     schema_version_ = schema_version;
+    consumer_group_id_ = consumer_group_id;
     tenant_id_ = tenant_id;
     task_id_ = task_id;
     task_type_ = ddl_type;
@@ -216,7 +218,7 @@ int ObDDLRetryTask::init(const ObDDLTaskRecord &task_record)
     is_schema_change_done_ = false; // do not worry about it, check_schema_change_done will correct it.
     if (nullptr != task_record.message_) {
       int64_t pos = 0;
-      if (OB_FAIL(deserlize_params_from_message(task_record.message_.ptr(), task_record.message_.length(), pos))) {
+      if (OB_FAIL(deserlize_params_from_message(task_record.tenant_id_, task_record.message_.ptr(), task_record.message_.length(), pos))) {
         LOG_WARN("fail to deserialize params from message", K(ret));
       }
     }
@@ -606,28 +608,28 @@ int ObDDLRetryTask::serialize_params_to_message(char *buf, const int64_t buf_siz
   if (OB_UNLIKELY(nullptr == buf || buf_size <= 0)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid arguments", K(ret), KP(buf), K(buf_size));
-  } else if (OB_FAIL(serialization::encode_i64(buf, buf_size, pos, task_version_))) {
-    LOG_WARN("fail to serialize task version", K(ret), K(task_version_));
+  } else if (OB_FAIL(ObDDLTask::serialize_params_to_message(buf, buf_size, pos))) {
+    LOG_WARN("ObDDLTask serialize failed", K(ret));
   } else if (OB_FAIL(ddl_arg_->serialize(buf, buf_size, pos))) {
     LOG_WARN("serialize table arg failed", K(ret));
-  } else if (OB_FAIL(ddl_tracing_.serialize(buf, buf_size, pos))) {
-    LOG_WARN("fail to serialize ddl_flt_ctx", K(ret));
   }
   return ret;
 }
 
-int ObDDLRetryTask::deserlize_params_from_message(const char *buf, const int64_t buf_size, int64_t &pos)
+int ObDDLRetryTask::deserlize_params_from_message(const uint64_t tenant_id, const char *buf, const int64_t buf_size, int64_t &pos)
 {
   int ret = OB_SUCCESS;
-  if (OB_UNLIKELY(nullptr == buf || buf_size <= 0)) {
+  if (OB_UNLIKELY(!is_valid_tenant_id(tenant_id) || nullptr == buf || buf_size <= 0)) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid arguments", K(ret), KP(buf), K(buf_size));
-  } else if (OB_FAIL(serialization::decode_i64(buf, buf_size, pos, &task_version_))) {
-    LOG_WARN("fail to deserialize task version", K(ret));
+    LOG_WARN("invalid arguments", K(ret), K(tenant_id), KP(buf), K(buf_size));
+  } else if (OB_FAIL(ObDDLTask::deserlize_params_from_message(tenant_id, buf, buf_size, pos))) {
+    LOG_WARN("fail to deserialize ObDDLTask", K(ret));
   } else if (ObDDLType::DDL_DROP_DATABASE == task_type_) {
     obrpc::ObDropDatabaseArg tmp_arg;
     if (OB_FAIL(tmp_arg.deserialize(buf, buf_size, pos))) {
       LOG_WARN("serialize table failed", K(ret));
+    } else if (OB_FAIL(ObDDLUtil::replace_user_tenant_id(tenant_id, tmp_arg))) {
+      LOG_WARN("replace user tenant id failed", K(ret), K(tenant_id), K(tmp_arg));
     } else if (OB_FAIL(deep_copy_ddl_arg(allocator_, task_type_, &tmp_arg))) {
       LOG_WARN("deep copy table arg failed", K(ret));
     }
@@ -635,6 +637,8 @@ int ObDDLRetryTask::deserlize_params_from_message(const char *buf, const int64_t
     obrpc::ObDropTableArg tmp_arg;
     if (OB_FAIL(tmp_arg.deserialize(buf, buf_size, pos))) {
       LOG_WARN("serialize table failed", K(ret));
+    } else if (OB_FAIL(ObDDLUtil::replace_user_tenant_id(tenant_id, tmp_arg))) {
+      LOG_WARN("replace user tenant id failed", K(ret), K(tenant_id), K(tmp_arg));
     } else if (OB_FAIL(deep_copy_ddl_arg(allocator_, task_type_, &tmp_arg))) {
       LOG_WARN("deep copy table arg failed", K(ret));
     }
@@ -642,6 +646,8 @@ int ObDDLRetryTask::deserlize_params_from_message(const char *buf, const int64_t
     obrpc::ObTruncateTableArg tmp_arg;
     if (OB_FAIL(tmp_arg.deserialize(buf, buf_size, pos))) {
       LOG_WARN("serialize table failed", K(ret));
+    } else if (OB_FAIL(ObDDLUtil::replace_user_tenant_id(tenant_id, tmp_arg))) {
+      LOG_WARN("replace user tenant id failed", K(ret), K(tenant_id), K(tmp_arg));
     } else if (OB_FAIL(deep_copy_ddl_arg(allocator_, task_type_, &tmp_arg))) {
       LOG_WARN("deep copy table arg failed", K(ret));
     }
@@ -652,15 +658,10 @@ int ObDDLRetryTask::deserlize_params_from_message(const char *buf, const int64_t
     obrpc::ObAlterTableArg tmp_arg;
     if (OB_FAIL(tmp_arg.deserialize(buf, buf_size, pos))) {
       LOG_WARN("serialize table failed", K(ret));
+    } else if (OB_FAIL(ObDDLUtil::replace_user_tenant_id(tenant_id, tmp_arg))) {
+      LOG_WARN("replace user tenant id failed", K(ret), K(tenant_id), K(tmp_arg));
     } else if (OB_FAIL(deep_copy_ddl_arg(allocator_, task_type_, &tmp_arg))) {
       LOG_WARN("deep copy table arg failed", K(ret));
-    }
-  }
-  if (OB_SUCC(ret)) {
-    if (pos < buf_size) {
-      if (OB_FAIL(ddl_tracing_.deserialize(buf, buf_size, pos))) {
-        LOG_WARN("fail to deserialize ddl_tracing_", K(ret));
-      }
     }
   }
   return ret;
@@ -668,11 +669,10 @@ int ObDDLRetryTask::deserlize_params_from_message(const char *buf, const int64_t
 
 int64_t ObDDLRetryTask::get_serialize_param_size() const
 {
-  int64_t serialize_param_size = serialization::encoded_length_i64(task_version_);
+  int64_t serialize_param_size = ObDDLTask::get_serialize_param_size();
   if (OB_NOT_NULL(ddl_arg_)) {
     serialize_param_size += ddl_arg_->get_serialize_size();
   }
-  serialize_param_size += ddl_tracing_.get_serialize_size();
   return serialize_param_size;
 }
 

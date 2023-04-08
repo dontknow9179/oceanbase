@@ -218,7 +218,7 @@ int ObLogMetaManager::get_table_meta(
             // caller deal with error code OB_TENANT_HAS_BEEN_DROPPED
             if (OB_IN_STOP_STATE != ret) {
               LOG_ERROR("add_and_get_table_meta_ fail", KR(ret), K(tenant_id),
-                  K(global_schema_version),
+                  K(global_schema_version), K(meta_info),
                   "table_name", table_schema->get_table_name(),
                   "table_id", table_schema->get_table_id());
             }
@@ -280,7 +280,7 @@ int ObLogMetaManager::get_table_meta(
           // caller deal with error code OB_TENANT_HAS_BEEN_DROPPED
           if (OB_IN_STOP_STATE != ret) {
             LOG_ERROR("add_and_get_table_meta_ fail", KR(ret), K(tenant_id),
-                K(global_schema_version),
+                K(global_schema_version), K(meta_info),
                 "table_name", table_schema->get_table_name(),
                 "table_id", table_schema->get_table_id());
           }
@@ -498,6 +498,7 @@ int ObLogMetaManager::get_meta_info_(MetaMapType &meta_map,
 
         if (OB_SUCC(ret)) {
           meta_info = tmp_meta_info;
+          LOG_TRACE("insert meta_info into meta_map succ", K(key), K(meta_info));
         } else {
           tmp_meta_info->~MetaInfoType();
           allocator_.free(static_cast<void*>(tmp_meta_info));
@@ -509,6 +510,8 @@ int ObLogMetaManager::get_meta_info_(MetaMapType &meta_map,
             } else if (OB_ISNULL(meta_info)) {
               LOG_ERROR("get meta info from meta_map fail", KR(ret), K(meta_info));
               ret = OB_ERR_UNEXPECTED;
+            } else {
+              LOG_TRACE("get meta_info from meta_map succ", K(key), K(meta_info));
             }
           } else {
             LOG_ERROR("insert meta info into map fail", KR(ret), K(key));
@@ -519,6 +522,7 @@ int ObLogMetaManager::get_meta_info_(MetaMapType &meta_map,
       LOG_ERROR("get meta info from map fail", KR(ret), K(key));
     } else {
       // OB_SUCCESS == ret
+      LOG_TRACE("get meta_info from meta_map succ", K(key), K(meta_info));
     }
   }
 
@@ -588,7 +592,7 @@ int ObLogMetaManager::add_and_get_table_meta_(
       if (OB_FAIL(build_table_meta_(table_schema, schema_mgr, table_meta, stop_flag))) {
         // caller deal with error code OB_TENANT_HAS_BEEN_DROPPED
         if (OB_IN_STOP_STATE != ret) {
-          LOG_ERROR("build_table_meta_ fail", KR(ret), KP(table_schema));
+          LOG_ERROR("build_table_meta_ fail", K(version), K(meta_info), KR(ret), KP(table_schema));
         }
       } else if (OB_FAIL(meta_info->set(version, table_meta))) {
         LOG_ERROR("set meta info meta info fail", KR(ret), K(version), KP(table_meta));
@@ -737,9 +741,14 @@ int ObLogMetaManager::build_table_meta_(
       table_meta = tmp_table_meta;
     } else {
       int tmp_ret = OB_SUCCESS;
-      if (NULL != tb_schema_info) {
-        if (OB_SUCCESS != (tmp_ret = free_table_schema_info_(tb_schema_info))) {
-          LOG_ERROR("free_table_schema_info_ fail", K(tmp_ret), K(tb_schema_info));
+      if (OB_NOT_NULL(tb_schema_info)) {
+        if (OB_TMP_FAIL(try_erase_table_schema_(
+            table_schema->get_tenant_id(),
+            table_schema->get_table_id(),
+            table_schema->get_schema_version()))) {
+          LOG_ERROR("try_erase_table_schema_ failed", KR(tmp_ret), K(tb_schema_info), KPC(table_schema));
+        } else if (OB_TMP_FAIL(free_table_schema_info_(tb_schema_info))) {
+          LOG_ERROR("free_table_schema_info_ fail", KR(tmp_ret), K(tb_schema_info), KPC(table_schema));
         }
       }
     }
@@ -1759,6 +1768,35 @@ int ObLogMetaManager::set_table_schema_(
     } else {
       LOG_INFO("set_table_schema succ", "schema_version", version, K(tenant_id),
           K(table_id), K(table_name), K(tb_schema_info));
+    }
+  }
+
+  return ret;
+}
+
+int ObLogMetaManager::try_erase_table_schema_(
+    const uint64_t tenant_id,
+    const uint64_t table_id,
+    const int64_t version)
+{
+  int ret = OB_SUCCESS;
+
+  if (OB_UNLIKELY(! inited_)) {
+    ret = OB_NOT_INIT;
+    LOG_ERROR("meta manager has not inited", KR(ret));
+  } else if (OB_UNLIKELY(OB_INVALID_TENANT_ID == tenant_id)
+      || OB_UNLIKELY(OB_INVALID_ID == table_id)
+      || OB_UNLIKELY(OB_INVALID_VERSION == version)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_ERROR("invalid argument", KR(ret), K(tenant_id), K(table_id), K(version));
+  } else {
+    MulVerTableKey table_key(version, tenant_id, table_id);
+
+    if (OB_FAIL(tb_schema_info_map_.erase(table_key))) {
+      if (OB_ENTRY_NOT_EXIST != ret) {
+        LOG_WARN("erase table_key from tb_schema_info_map_ failed, may not affect main process, ignore", KR(ret), K(table_key));
+      }
+      ret = OB_SUCCESS;
     }
   }
 

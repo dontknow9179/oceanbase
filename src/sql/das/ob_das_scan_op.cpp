@@ -163,6 +163,9 @@ ObDASScanOp::~ObDASScanOp()
   if (result_ != nullptr && result_->get_type() == ObNewRowIterator::ObTableScanIterator) {
     LOG_ERROR_RET(OB_ERR_UNEXPECTED, "table scan iter is not released, maybe some bug occured",
               KPC(scan_ctdef_), K(scan_param_), KPC(scan_rtdef_));
+    #ifdef ENABLE_SANITY
+    abort();
+    #endif
   }
   scan_param_.destroy();
 }
@@ -524,9 +527,9 @@ int ObDASScanOp::fill_task_result(ObIDASTaskResult &task_result, bool &has_more,
         has_more = true;
       }
       if (OB_SUCC(ret) && has_more) {
-        LOG_DEBUG("try fill task result", K(simulate_row_cnt),
-                   K(datum_store.get_row_cnt()), K(has_more),
-                  "output_row", ROWEXPR2STR(eval_ctx, result_output));
+        PRINT_VECTORIZED_ROWS(SQL, DEBUG, eval_ctx, result_output, remain_row_cnt_,
+                              K(simulate_row_cnt), K(datum_store.get_row_cnt()),
+                              K(has_more));
       }
     }
   }
@@ -590,11 +593,12 @@ int ObDASScanOp::reuse_iter()
   int &ret = errcode_;
   ObITabletScan &tsc_service = get_tsc_service();
   ObLocalIndexLookupOp *lookup_op = get_lookup_op();
-  scan_param_.need_switch_param_ = need_switch_param();
-  if (OB_FAIL(tsc_service.reuse_scan_iter(need_switch_param(), get_storage_scan_iter()))) {
+  const ObTabletID &storage_tablet_id = scan_param_.tablet_id_;
+  scan_param_.need_switch_param_ = (storage_tablet_id.is_valid() && storage_tablet_id != tablet_id_ ? true : false);
+  if (OB_FAIL(tsc_service.reuse_scan_iter(scan_param_.need_switch_param_, get_storage_scan_iter()))) {
     LOG_WARN("reuse scan iterator failed", K(ret));
   } else if (lookup_op != nullptr
-      && OB_FAIL(lookup_op->reset_lookup_state(need_switch_param()))) {
+      && OB_FAIL(lookup_op->reset_lookup_state())) {
     LOG_WARN("reuse lookup iterator failed", K(ret));
   } else {
     scan_param_.key_ranges_.reuse();
@@ -726,6 +730,14 @@ int ObDASScanResult::init(const ObIDASTaskOp &op, common::ObIAllocator &alloc)
   return ret;
 }
 
+int ObDASScanResult::reuse()
+{
+  int ret = OB_SUCCESS;
+  result_iter_.reset();
+  datum_store_.reset();
+  return ret;
+}
+
 int ObDASScanResult::link_extra_result(ObDASExtraData &extra_result)
 {
   extra_result.set_output_info(output_exprs_, eval_ctx_);
@@ -773,8 +785,6 @@ int ObLocalIndexLookupOp::init(const ObDASScanCtDef *lookup_ctdef,
          .set_properties(lib::USE_TL_PAGE_OPTIONAL);
     if (OB_FAIL(CURRENT_CONTEXT->CREATE_CONTEXT(lookup_memctx_, param))) {
       LOG_WARN("create lookup mem context entity failed", K(ret));
-    } else {
-      lookup_rtdef_->scan_allocator_.set_alloc(&lookup_memctx_->get_arena_allocator());
     }
   }
   int simulate_error = EVENT_CALL(EventTable::EN_DAS_SIMULATE_LOOKUPOP_INIT_ERROR);
@@ -924,6 +934,8 @@ int ObLocalIndexLookupOp::do_index_lookup()
       }
     }
   } else {
+    const ObTabletID &storage_tablet_id = scan_param_.tablet_id_;
+    scan_param_.need_switch_param_ = (storage_tablet_id.is_valid() && storage_tablet_id != tablet_id_ ? true : false);
     scan_param_.tablet_id_ = tablet_id_;
     scan_param_.ls_id_ = ls_id_;
     if (OB_FAIL(reuse_iter())) {
@@ -973,7 +985,7 @@ int ObLocalIndexLookupOp::process_next_index_batch_for_row()
 {
   int ret = OB_SUCCESS;
   if (need_next_index_batch()) {
-    reset_lookup_state(false);
+    reset_lookup_state();
     index_end_ = false;
     state_ = INDEX_SCAN;
   } else {
@@ -989,7 +1001,7 @@ int ObLocalIndexLookupOp::process_next_index_batch_for_rows(int64_t &count)
   if (OB_FAIL(check_lookup_row_cnt())) {
     LOG_WARN("check lookup row cnt failed", K(ret));
   } else if (need_next_index_batch()) {
-    reset_lookup_state(false);
+    reset_lookup_state();
     index_end_ = false;
     state_ = INDEX_SCAN;
     ret = OB_SUCCESS;
@@ -1017,11 +1029,15 @@ int ObLocalIndexLookupOp::check_lookup_row_cnt()
       ObString func_name = ObString::make_string("check_lookup_row_cnt");
       LOG_USER_ERROR(OB_ERR_DEFENSIVE_CHECK, func_name.length(), func_name.ptr());
       LOG_ERROR("Fatal Error!!! Catch a defensive error!",
-                K(ret), K_(lookup_rowkey_cnt), K_(lookup_row_cnt),
-                "index_group_cnt", get_index_group_cnt(),
-                "lookup_group_cnt", get_lookup_group_cnt(),
-                "scan_range", scan_param_.key_ranges_,
-                KPC_(lookup_ctdef), KPC_(lookup_rtdef));
+                      K(ret), K_(lookup_rowkey_cnt), K_(lookup_row_cnt),
+                      "index_group_cnt", get_index_group_cnt(),
+                      "lookup_group_cnt", get_lookup_group_cnt(),
+                      "scan_range", scan_param_.key_ranges_,
+                      "index_table_id", index_ctdef_->ref_table_id_ ,
+                      "data_table_tablet_id", tablet_id_ ,
+                      KPC_(tx_desc));
+      LOG_ERROR("Fatal Error!!! Catch a defensive error!",
+                K(ret), KPC_(lookup_ctdef), KPC_(lookup_rtdef));
     }
   }
   return ret;
@@ -1098,7 +1114,7 @@ OB_INLINE int ObLocalIndexLookupOp::init_scan_param()
   scan_param_.reserved_cell_count_ = lookup_ctdef_->access_column_ids_.count();
   scan_param_.allocator_ = &lookup_rtdef_->stmt_allocator_;
   scan_param_.sql_mode_ = lookup_rtdef_->sql_mode_;
-  scan_param_.scan_allocator_ = &lookup_rtdef_->scan_allocator_;
+  scan_param_.scan_allocator_ = &lookup_memctx_->get_arena_allocator();
   scan_param_.frozen_version_ = lookup_rtdef_->frozen_version_;
   scan_param_.force_refresh_lc_ = lookup_rtdef_->force_refresh_lc_;
   scan_param_.output_exprs_ = &(lookup_ctdef_->pd_expr_spec_.access_exprs_);
@@ -1150,7 +1166,7 @@ int ObLocalIndexLookupOp::reuse_iter()
   }
   return ret;
 }
-int ObLocalIndexLookupOp::reset_lookup_state(bool need_switch_param)
+int ObLocalIndexLookupOp::reset_lookup_state()
 {
   int ret = OB_SUCCESS;
   state_ = INDEX_SCAN;
@@ -1159,7 +1175,6 @@ int ObLocalIndexLookupOp::reset_lookup_state(bool need_switch_param)
   // Keep lookup_rtdef_->stmt_allocator_.alloc_ consistent with index_rtdef_->stmt_allocator_.alloc_
   // to avoid memory expansion
   if (lookup_iter_ != nullptr) {
-    scan_param_.need_switch_param_ = need_switch_param;
     scan_param_.key_ranges_.reuse();
     scan_param_.ss_key_ranges_.reuse();
   }

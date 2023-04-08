@@ -56,6 +56,7 @@ int takeover_state_to_string(const TakeOverState log_type,
 
 struct RCDiagnoseInfo {
   RCDiagnoseInfo() { reset(); }
+  ~RCDiagnoseInfo() { reset(); }
   void reset();
   int64_t id_;
   TakeOverState state_;
@@ -84,7 +85,6 @@ public:
 private:
   int resume_leader_when_switch_failure_(int64_t cursor);
 private:
-  static constexpr int64_t OB_LOG_BASE_TYPE_STR_MAX_LEN = 128;
   ObSpinLock lock_;
   ObIRoleChangeSubHandler* sub_role_change_handler_arr_[ObLogBaseType::MAX_LOG_BASE_TYPE];
 };

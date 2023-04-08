@@ -107,6 +107,7 @@ private:
   share::schema::ObMultiVersionSchemaService &schema_service_;
   ObTableGroupCheckInfoMap check_part_option_map_;
   common::hash::ObHashSet<uint64_t> part_option_not_match_set_;
+  common::ObArenaAllocator allocator_;
   bool is_inited_;
 };
 
@@ -225,6 +226,7 @@ private:
   int check_sys_view_(const uint64_t tenant_id,
                       const share::schema::ObTableSchema &hard_code_table);
   int check_cancel();
+  int check_tenant_status_(const uint64_t tenant_id);
 private:
   bool inited_;
   volatile bool stopped_;

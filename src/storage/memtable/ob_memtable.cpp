@@ -106,6 +106,7 @@ ObMemtable::ObMemtable()
       pending_cb_cnt_(0),
       unsubmitted_cnt_(0),
       unsynced_cnt_(0),
+      memtable_mgr_op_cnt_(0),
       logging_blocked_(false),
       logging_blocked_start_time(0),
       unset_active_memtable_logging_blocked_(false),
@@ -200,7 +201,10 @@ int ObMemtable::init(const ObITable::TableKey &table_key,
 int ObMemtable::remove_unused_callback_for_uncommited_txn_()
 {
   int ret = OB_SUCCESS;
-  transaction::ObTransService *txs_svr = MTL(transaction::ObTransService *);
+  // NB: Do not use cache here, because the trans_service may be destroyed under
+  // MTL_DESTROY() and the cache is pointing to a broken memory.
+  transaction::ObTransService *txs_svr =
+    MTL_CTX()->get<transaction::ObTransService *>();
 
   if (NULL != txs_svr
       && OB_FAIL(txs_svr->remove_callback_for_uncommited_txn(this))) {
@@ -215,11 +219,15 @@ void ObMemtable::destroy()
   ObTimeGuard time_guard("ObMemtable::destroy()", 100 * 1000);
   int ret = OB_SUCCESS;
   if (is_inited_) {
+    const common::ObTabletID tablet_id = key_.tablet_id_;
+    const int64_t cost_time = ObTimeUtility::current_time() - mt_stat_.release_time_;
+    if (cost_time > 1 * 1000 * 1000) {
+      STORAGE_LOG(WARN, "it costs too much time from release to destroy", K(cost_time), K(tablet_id), KP(this));
+    }
     STORAGE_LOG(INFO, "memtable destroyed", K(*this));
     time_guard.click();
     ObMemtableStat::get_instance().unregister_memtable(this);
     time_guard.click();
-    const common::ObTabletID tablet_id = key_.tablet_id_;
     ObTenantFreezer *freezer = nullptr;
     freezer = MTL(ObTenantFreezer *);
     if (OB_SUCCESS != freezer->unset_tenant_slow_freeze(tablet_id)) {
@@ -250,6 +258,7 @@ void ObMemtable::destroy()
   freeze_state_ = ObMemtableFreezeState::INVALID;
   unsubmitted_cnt_ = 0;
   unsynced_cnt_ = 0;
+  memtable_mgr_op_cnt_ = 0;
   logging_blocked_ = false;
   logging_blocked_start_time = 0;
   unset_active_memtable_logging_blocked_ = false;
@@ -269,11 +278,17 @@ void ObMemtable::destroy()
 int ObMemtable::safe_to_destroy(bool &is_safe)
 {
   int ret = OB_SUCCESS;
+  int64_t ref_cnt = get_ref();
+  int64_t write_ref_cnt = get_write_ref();
+  int64_t unsubmitted_cnt = get_unsubmitted_cnt();
+  int64_t unsynced_cnt = get_unsynced_cnt();
 
-  is_safe = (0 == get_ref() &&
-             0 == get_write_ref() &&
-             0 == get_unsubmitted_cnt() &&
-             0 == get_unsynced_cnt());
+  is_safe = (0 == ref_cnt && 0 == write_ref_cnt);
+  if (is_safe) {
+    int64_t multi_source_data_unsync_cnt = multi_source_data_.get_all_unsync_cnt_for_multi_data();
+    is_safe = (0 == unsubmitted_cnt && 0 == unsynced_cnt) ||
+      (unsubmitted_cnt == multi_source_data_unsync_cnt && unsynced_cnt == multi_source_data_unsync_cnt);
+  }
 
   return ret;
 }
@@ -1208,8 +1223,12 @@ int ObMemtable::lock_row_on_frozen_stores_(ObStoreCtx &ctx,
           ret = OB_ERR_UNEXPECTED;
           TRANS_LOG(WARN, "ObIStore is null", K(ret), K(i));
         } else if (stores->at(i)->is_data_memtable()) {
-          auto &mvcc_engine = static_cast<ObMemtable *>(stores->at(i))->get_mvcc_engine();
-          if (OB_FAIL(mvcc_engine.check_row_locked(ctx.mvcc_acc_ctx_, key, lock_state))) {
+          ObMemtable *memtable = static_cast<ObMemtable *>(stores->at(i));
+          ObMvccEngine &mvcc_engine = memtable->get_mvcc_engine();
+          if (OB_UNLIKELY(memtable->is_active_memtable())) {
+            ret = OB_ERR_UNEXPECTED;
+            TRANS_LOG(ERROR, "lock row on frozen stores check an active memtable", K(ret), KPC(stores));
+          } else if (OB_FAIL(mvcc_engine.check_row_locked(ctx.mvcc_acc_ctx_, key, lock_state))) {
             TRANS_LOG(WARN, "mvcc engine check row lock fail", K(ret), K(lock_state));
           }
         } else if (stores->at(i)->is_sstable()) {
@@ -1398,7 +1417,7 @@ int ObMemtable::inc_unsubmitted_cnt()
 {
   int ret = OB_SUCCESS;
   share::ObLSID ls_id = freezer_->get_ls_id();
-  int64_t unsubmitted_cnt = ATOMIC_AAF(&unsubmitted_cnt_, 1);
+  int64_t unsubmitted_cnt = inc_unsubmitted_cnt_();
   TRANS_LOG(DEBUG, "inc_unsubmitted_cnt", K(ls_id), KPC(this), K(lbt()));
 
   if (ATOMIC_LOAD(&unset_active_memtable_logging_blocked_)) {
@@ -1424,22 +1443,20 @@ int ObMemtable::dec_unsubmitted_cnt()
   // get unsubmitted_cnt 1
   //                             dec unsubmitted_cnt to 0
   // -----------------------------------------------------
-  // get old_unsubmitted_cnt to ensure only one thread can unset logging_blocked
-  int64_t old_unsubmitted_cnt = ATOMIC_SAF(&unsubmitted_cnt_, 1);
+  int64_t old_unsubmitted_cnt = dec_unsubmitted_cnt_();
 
   // must maintain the order of getting variables to avoid concurrency problems
   // is_frozen_memtable() can affect wirte_ref_cnt
   // write_ref_cnt can affect unsubmitted_cnt and unsynced_cnt
   bool is_frozen = is_frozen_memtable();
   int64_t write_ref_cnt = get_write_ref();
-  int64_t new_unsubmitted_cnt = ATOMIC_LOAD(&unsubmitted_cnt_);
+  int64_t new_unsubmitted_cnt = get_unsubmitted_cnt();
   TRANS_LOG(DEBUG, "dec_unsubmitted_cnt", K(ls_id), KPC(this), K(lbt()));
 
   if (OB_UNLIKELY(old_unsubmitted_cnt < 0)) {
     TRANS_LOG(ERROR, "unsubmitted_cnt not match", K(ret), K(ls_id), KPC(this));
   } else if (is_frozen &&
              0 == write_ref_cnt &&
-             0 == old_unsubmitted_cnt &&
              0 == new_unsubmitted_cnt) {
     (void)unset_logging_blocked_for_active_memtable();
     TRANS_LOG(INFO, "memtable log submitted", K(ret), K(ls_id), KPC(this));
@@ -1464,17 +1481,15 @@ int64_t ObMemtable::dec_write_ref()
   // get unsubmitted_cnt 1
   //                             dec unsubmitted_cnt to 0
   // -----------------------------------------------------
-  // get old_write_ref_cnt to ensure only one thread can unset logging_blocked
-  int64_t old_write_ref_cnt = ATOMIC_SAF(&write_ref_cnt_, 1);
+  int64_t old_write_ref_cnt = dec_write_ref_();
 
   // must maintain the order of getting variables to avoid concurrency problems
   // is_frozen_memtable() can affect wirte_ref_cnt
   // write_ref_cnt can affect unsubmitted_cnt and unsynced_cnt
   bool is_frozen = is_frozen_memtable();
-  int64_t new_write_ref_cnt = ATOMIC_LOAD(&write_ref_cnt_);
+  int64_t new_write_ref_cnt = get_write_ref();
   int64_t unsubmitted_cnt = get_unsubmitted_cnt();
   if (is_frozen &&
-      0 == old_write_ref_cnt &&
       0 == new_write_ref_cnt &&
       0 == unsubmitted_cnt) {
     (void)unset_logging_blocked_for_active_memtable();
@@ -1489,8 +1504,8 @@ int64_t ObMemtable::dec_write_ref()
 
 void ObMemtable::inc_unsynced_cnt()
 {
-  ATOMIC_AAF(&unsynced_cnt_, 1);
-  TRANS_LOG(DEBUG, "inc_unsynced_cnt", K(ls_id), KPC(this), K(lbt()));
+  int64_t unsynced_cnt = inc_unsynced_cnt_();
+  TRANS_LOG(DEBUG, "inc_unsynced_cnt", K(ls_id), K(unsynced_cnt), KPC(this), K(lbt()));
 }
 
 int ObMemtable::dec_unsynced_cnt()
@@ -1498,21 +1513,19 @@ int ObMemtable::dec_unsynced_cnt()
   int ret = OB_SUCCESS;
   share::ObLSID ls_id = freezer_->get_ls_id();
 
-  // get old_unsynced_cnt to ensure only one thread can resolve boundary
-  int64_t old_unsynced_cnt = ATOMIC_SAF(&unsynced_cnt_, 1);
+  int64_t old_unsynced_cnt = dec_unsynced_cnt_();
 
   // must maintain the order of getting variables to avoid concurrency problems
   // is_frozen_memtable() can affect wirte_ref_cnt
   // write_ref_cnt can affect unsubmitted_cnt and unsynced_cnt
   bool is_frozen = is_frozen_memtable();
   int64_t write_ref_cnt = get_write_ref();
-  int64_t new_unsynced_cnt = ATOMIC_LOAD(&unsynced_cnt_);
+  int64_t new_unsynced_cnt = get_unsynced_cnt();
   TRANS_LOG(DEBUG, "dec_unsynced_cnt", K(ls_id), KPC(this), K(lbt()));
   if (OB_UNLIKELY(old_unsynced_cnt < 0)) {
     TRANS_LOG(ERROR, "unsynced_cnt not match", K(ret), K(ls_id), KPC(this));
   } else if (is_frozen &&
              0 == write_ref_cnt &&
-             0 == old_unsynced_cnt &&
              0 == new_unsynced_cnt) {
     resolve_right_boundary();
     TRANS_LOG(INFO, "[resolve_right_boundary] dec_unsynced_cnt", K(ls_id), KPC(this));
@@ -1526,24 +1539,64 @@ int ObMemtable::dec_unsynced_cnt()
 void ObMemtable::unset_logging_blocked_for_active_memtable()
 {
   int ret = OB_SUCCESS;
-  do {
-    if (OB_FAIL(memtable_mgr_->unset_logging_blocked_for_active_memtable(this))) {
-      TRANS_LOG(ERROR, "fail to unset logging blocked for active memtable", K(ret), K(ls_id), KPC(this));
-      ob_usleep(100);
-    }
-  } while (OB_FAIL(ret));
+  MemtableMgrOpGuard memtable_mgr_op_guard(this);
+  storage::ObTabletMemtableMgr *memtable_mgr = memtable_mgr_op_guard.get_memtable_mgr();
+
+  if (OB_NOT_NULL(memtable_mgr)) {
+    do {
+      if (OB_FAIL(memtable_mgr->unset_logging_blocked_for_active_memtable(this))) {
+        TRANS_LOG(ERROR, "fail to unset logging blocked for active memtable", K(ret), K(ls_id), KPC(this));
+        ob_usleep(100);
+      }
+    } while (OB_FAIL(ret));
+  }
 }
 
 void ObMemtable::resolve_left_boundary_for_active_memtable()
 {
   int ret = OB_SUCCESS;
+  MemtableMgrOpGuard memtable_mgr_op_guard(this);
+  storage::ObTabletMemtableMgr *memtable_mgr = memtable_mgr_op_guard.get_memtable_mgr();
   const SCN new_start_scn = MAX(get_end_scn(), get_migration_clog_checkpoint_scn());
-  do {
-    if (OB_FAIL(memtable_mgr_->resolve_left_boundary_for_active_memtable(this, new_start_scn, get_snapshot_version_scn()))) {
-      TRANS_LOG(ERROR, "fail to set start log ts for active memtable", K(ret), K(ls_id), KPC(this));
-      ob_usleep(100);
-    }
-  } while (OB_FAIL(ret));
+
+  if (OB_NOT_NULL(memtable_mgr)) {
+    do {
+      if (OB_FAIL(memtable_mgr->resolve_left_boundary_for_active_memtable(this, new_start_scn, get_snapshot_version_scn()))) {
+        TRANS_LOG(ERROR, "fail to set start log ts for active memtable", K(ret), K(ls_id), KPC(this));
+        ob_usleep(100);
+      }
+    } while (OB_FAIL(ret));
+  }
+}
+
+int64_t ObMemtable::inc_write_ref_()
+{
+  return ATOMIC_AAF(&write_ref_cnt_, 1);
+}
+
+int64_t ObMemtable::dec_write_ref_()
+{
+  return ATOMIC_SAF(&write_ref_cnt_, 1);
+}
+
+int64_t ObMemtable::inc_unsubmitted_cnt_()
+{
+  return ATOMIC_AAF(&unsubmitted_cnt_, 1);
+}
+
+int64_t ObMemtable::dec_unsubmitted_cnt_()
+{
+  return ATOMIC_SAF(&unsubmitted_cnt_, 1);
+}
+
+int64_t ObMemtable::inc_unsynced_cnt_()
+{
+  return ATOMIC_AAF(&unsynced_cnt_, 1);
+}
+
+int64_t ObMemtable::dec_unsynced_cnt_()
+{
+  return ATOMIC_SAF(&unsynced_cnt_, 1);
 }
 
 void ObMemtable::inc_unsubmitted_and_unsynced_cnt()
@@ -1786,8 +1839,6 @@ bool ObMemtable::ready_for_flush_()
       migration_clog_checkpoint_scn >= get_end_scn() &&
       0 != unsynced_cnt &&
       multi_source_data_.get_all_unsync_cnt_for_multi_data() == unsynced_cnt) {
-    ATOMIC_STORE(&unsubmitted_cnt_, 0);
-    ATOMIC_STORE(&unsynced_cnt_, 0);
     bool_ret = true;
     TRANS_LOG(INFO, "skip ready for flush for migration", KPC(this));
   }
@@ -1818,7 +1869,10 @@ bool ObMemtable::ready_for_flush_()
     // ensure unset all frozen memtables'logging_block
     ObTableHandleV2 handle;
     ObMemtable *first_frozen_memtable = nullptr;
-    if (OB_FAIL(memtable_mgr_->get_first_frozen_memtable(handle))) {
+    MemtableMgrOpGuard memtable_mgr_op_guard(this);
+    storage::ObTabletMemtableMgr *memtable_mgr = memtable_mgr_op_guard.get_memtable_mgr();
+    if (OB_ISNULL(memtable_mgr)) {
+    } else if (OB_FAIL(memtable_mgr->get_first_frozen_memtable(handle))) {
       TRANS_LOG(WARN, "fail to get first_frozen_memtable", K(ret));
     } else if (OB_FAIL(handle.get_data_memtable(first_frozen_memtable))) {
       TRANS_LOG(WARN, "fail to get memtable", K(ret));
@@ -2039,19 +2093,6 @@ int ObMemtable::flush(share::ObLSID ls_id)
   if (is_flushed_) {
     ret = OB_NO_NEED_UPDATE;
   } else {
-    if (mt_stat_.create_flush_dag_time_ == 0 &&
-        mt_stat_.ready_for_flush_time_ != 0 &&
-        cur_time - mt_stat_.ready_for_flush_time_ > 30 * 1000 * 1000) {
-      STORAGE_LOG(WARN, "memtable can not create dag successfully for long time",
-                K(ls_id), K(*this), K(mt_stat_.ready_for_flush_time_));
-      ADD_SUSPECT_INFO(MINI_MERGE,
-                       ls_id, get_tablet_id(),
-                       "memtable can not create dag successfully",
-                       "has been ready for flush time:",
-                       cur_time - mt_stat_.ready_for_flush_time_,
-                       "ready for flush time:",
-                       mt_stat_.ready_for_flush_time_);
-    }
     ObTabletMergeDagParam param;
     param.ls_id_ = ls_id;
     param.tablet_id_ = key_.tablet_id_;
@@ -2065,6 +2106,23 @@ int ObMemtable::flush(share::ObLSID ls_id)
     } else {
       mt_stat_.create_flush_dag_time_ = cur_time;
       TRANS_LOG(INFO, "schedule tablet merge dag successfully", K(ret), K(param), KPC(this));
+    }
+
+    if (OB_FAIL(ret) && mt_stat_.create_flush_dag_time_ == 0 &&
+        mt_stat_.ready_for_flush_time_ != 0 &&
+        cur_time - mt_stat_.ready_for_flush_time_ > 30 * 1000 * 1000) {
+      STORAGE_LOG(WARN, "memtable can not create dag successfully for long time",
+                K(ls_id), K(*this), K(mt_stat_.ready_for_flush_time_));
+      const char *str_user_error = ob_errpkt_str_user_error(ret, false);
+      ADD_SUSPECT_INFO(MINI_MERGE,
+                       ls_id, get_tablet_id(),
+                       "memtable can not create dag successfully",
+                       "extra info",
+                       str_user_error,
+                       "has been ready for flush time:",
+                       cur_time - mt_stat_.ready_for_flush_time_,
+                       "ready for flush time:",
+                       mt_stat_.ready_for_flush_time_);
     }
   }
 

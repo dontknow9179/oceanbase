@@ -26,6 +26,7 @@
 #include "storage/blocksstable/ob_sstable.h"
 #include "lib/container/ob_loser_tree.h"
 #include "storage/compaction/ob_partition_rows_merger.h"
+#include "storage/compaction/ob_compaction_trans_cache.h"
 
 namespace oceanbase
 {
@@ -65,12 +66,15 @@ protected:
   int open_macro_writer(ObMergeParameter &merge_param);
   int prepare_merge_partition(ObMergeParameter &merge_param,
                               ObPartitionMergeHelper &merge_helper);
+  int get_macro_block_count_to_rewrite(const ObMergeParameter &merge_param,
+                                       int64_t &need_rewrite_block_cnt);
   int check_row_columns(const blocksstable::ObDatumRow &row);
   int try_filter_row(const blocksstable::ObDatumRow &row, ObICompactionFilter::ObFilterRet &filter_ret);
   int get_base_iter_curr_macro_block(const blocksstable::ObMacroBlockDesc *&macro_desc);
   void set_base_iter(const MERGE_ITER_ARRAY &minimum_iters);
 protected:
   static const int64_t DEFAULT_ITER_ARRAY_SIZE = DEFAULT_ITER_COUNT * sizeof(ObPartitionMergeIter *);
+  static const int64_t CACHED_TRANS_STATE_MAX_CNT = 10 * 1024l;
 protected:
   common::ObArenaAllocator allocator_;
   ObTabletMergeCtx *merge_ctx_;
@@ -81,7 +85,9 @@ protected:
   blocksstable::ObMacroBlockWriter *macro_writer_;
   MERGE_ITER_ARRAY minimum_iters_;
   ObPartitionMergeIter *base_iter_;
+  ObCachedTransStateMgr trans_state_mgr_;
   int64_t task_idx_;
+  bool check_macro_need_merge_;
   bool is_inited_;
 };
 
@@ -102,8 +108,6 @@ protected:
 private:
   int merge_micro_block_iter(ObPartitionMergeIter &iter, int64_t &reuse_row_cnt);
   int reuse_base_sstable(ObPartitionMajorMergeHelper &merge_helper);
-  int get_macro_block_count_to_rewrite(const blocksstable::ObDatumRange &merge_range,
-                                       int64_t &need_rewrite_block_cnt);
 private:
   int64_t rewrite_block_cnt_;
   int64_t need_rewrite_block_cnt_;

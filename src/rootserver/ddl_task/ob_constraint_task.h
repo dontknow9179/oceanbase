@@ -97,6 +97,7 @@ public:
       const share::ObDDLType ddl_type,
       const int64_t schema_version,
       const obrpc::ObAlterTableArg &alter_table_arg,
+      const int64_t consumer_group_id,
       const int64_t parent_task_id = 0,
       const int64_t status = share::ObDDLTaskStatus::WAIT_TRANS_END,
       const int64_t snapshot_version = 0);
@@ -104,7 +105,7 @@ public:
   virtual int process() override;
   int update_check_constraint_finish(const int ret_code);
   virtual int serialize_params_to_message(char *buf, const int64_t buf_size, int64_t &pos) const override;
-  virtual int deserlize_params_from_message(const char *buf, const int64_t buf_size, int64_t &pos) override;
+  virtual int deserlize_params_from_message(const uint64_t tenant_id, const char *buf, const int64_t buf_size, int64_t &pos) override;
   virtual int64_t get_serialize_param_size() const override;
   virtual void flt_set_task_span_tag() const override;
   virtual void flt_set_status_span_tag() const override;

@@ -169,10 +169,11 @@ ObSQLSessionInfo::ObSQLSessionInfo() :
       is_table_name_hidden_(false),
       piece_cache_(NULL),
       is_load_data_exec_session_(false),
-      is_registered_to_deadlock_(false),
       pl_exact_err_msg_(),
       is_ps_prepare_stage_(false),
-      got_conn_res_(false),
+      got_tenant_conn_res_(false),
+      got_user_conn_res_(false),
+      conn_res_user_id_(OB_INVALID_ID),
       mem_context_(nullptr),
       cur_exec_ctx_(nullptr),
       restore_auto_commit_(false),
@@ -197,7 +198,6 @@ int ObSQLSessionInfo::init(uint32_t sessid, uint64_t proxy_sessid,
   UNUSED(tenant_id);
   int ret = OB_SUCCESS;
   static const int64_t PS_BUCKET_NUM = 64;
-  set_registered_to_deadlock(false);
   if (OB_FAIL(ObBasicSessionInfo::init(sessid, proxy_sessid, bucket_allocator, tz_info))) {
     LOG_WARN("fail to init basic session info", K(ret));
   } else if (!is_acquire_from_pool() &&
@@ -314,7 +314,6 @@ void ObSQLSessionInfo::reset(bool skip_sys_var)
     inner_conn_ = NULL;
     session_stat_.reset();
     pl_sync_pkg_vars_ = NULL;
-    ObBasicSessionInfo::reset(skip_sys_var);
     //encrypt_info_.reset();
     cached_schema_guard_info_.reset();
     encrypt_info_.reset();
@@ -326,7 +325,6 @@ void ObSQLSessionInfo::reset(bool skip_sys_var)
     prelock_ = false;
     proxy_version_ = 0;
     min_proxy_version_ps_ = 0;
-    set_registered_to_deadlock(false);
     if (OB_NOT_NULL(mem_context_)) {
       destroy_contexts_map(contexts_map_, mem_context_->get_malloc_allocator());
       DESTROY_CONTEXT(mem_context_);
@@ -343,15 +341,17 @@ void ObSQLSessionInfo::reset(bool skip_sys_var)
     is_ob20_protocol_ = false;
     is_session_var_sync_ = false;
     int temp_ret = OB_SUCCESS;
-    dblink_context_.reset();
     sql_req_level_ = 0;
     optimizer_tracer_.reset();
     sql_plan_manager_ = NULL;
     destroy_session_plan_mgr();
+    expect_group_id_ = OB_INVALID_ID;
+    group_id_not_expected_ = false;
+    //call at last time
+    dblink_context_.reset(); // need reset before ObBasicSessionInfo::reset(skip_sys_var);
+    ObBasicSessionInfo::reset(skip_sys_var);
     txn_free_route_ctx_.reset();
   }
-  expect_group_id_ = OB_INVALID_ID;
-  group_id_not_expected_ = false;
 }
 
 void ObSQLSessionInfo::clean_status()
@@ -377,7 +377,7 @@ void ObSQLSessionInfo::destroy(bool skip_sys_var)
     }
 
     // 反序列化出来的 session 不应该做 end_trans 等清理工作
-    // bug: https://aone.alibaba-inc.com/issue/17438593
+    // bug:
     if (false == get_is_deserialized()) {
       if (false == ObSchemaService::g_liboblog_mode_) {
         //session断开时调用ObTransService::end_trans回滚事务，
@@ -442,7 +442,6 @@ void ObSQLSessionInfo::destroy(bool skip_sys_var)
 
     // 非分布式需要的话，分布式也需要，用于清理package的全局变量值
     reset_all_package_state();
-    dblink_context_.reset();
     reset(skip_sys_var);
     destroy_session_plan_mgr();
     is_inited_ = false;
@@ -761,7 +760,7 @@ ObMySQLRequestManager* ObSQLSessionInfo::get_request_manager()
 {
   int ret = OB_SUCCESS;
   if (NULL == request_manager_) {
-    MTL_SWITCH(get_priv_tenant_id()) {
+    MTL_SWITCH(get_effective_tenant_id()) {
       request_manager_ = MTL(obmysql::ObMySQLRequestManager*);
     }
   }
@@ -1650,15 +1649,8 @@ const ObAuditRecordData &ObSQLSessionInfo::get_final_audit_record(
     audit_record_.sql_cs_type_ = CS_TYPE_INVALID;
   }
 
-  if (OB_SUCC(ret) && OB_INVALID_STMT_ID != audit_record_.ps_stmt_id_) {
-    ObPsStmtId inner_stmt_id = OB_INVALID_STMT_ID;
-    if (OB_SUCC(get_inner_ps_stmt_id(audit_record_.ps_stmt_id_, inner_stmt_id))) {
-      audit_record_.ps_inner_stmt_id_ = inner_stmt_id;
-    } else {
-      ret = OB_SUCCESS;
-    }
-  }
   audit_record_.txn_free_route_flag_ = txn_free_route_ctx_.get_audit_record();
+  audit_record_.txn_free_route_version_ = txn_free_route_ctx_.get_global_version();
   return audit_record_;
 }
 
@@ -2437,22 +2429,32 @@ int ObSQLSessionInfo::on_user_disconnect()
   return ret;
 }
 
+// prepare baseline for the following `calc_txn_free_route` to get the diff
+void ObSQLSessionInfo::prep_txn_free_route_baseline(bool reset_audit)
+{
+#define RESET_TXN_STATE_ENCODER_CHANGED_(x) txn_##x##_info_encoder_.is_changed_ = false
+#define RESET_TXN_STATE_ENCODER_CHANGED(x) RESET_TXN_STATE_ENCODER_CHANGED_(x)
+  LST_DO(RESET_TXN_STATE_ENCODER_CHANGED, (;), static, dynamic, participants, extra);
+#undef RESET_TXN_STATE_ENCODER_CHANGED
+#undef RESET_TXN_STATE_ENCODER_CHANGED_
+  if (reset_audit) {
+    txn_free_route_ctx_.reset_audit_record();
+  }
+  txn_free_route_ctx_.init_before_handle_request(tx_desc_);
+}
+
 void ObSQLSessionInfo::post_sync_session_info()
 {
   if (!get_is_in_retry()) {
-#define RESET_TXN_STATE_ENCODER_CHANGED_(x) txn_##x##_info_encoder_.is_changed_ = false
-#define RESET_TXN_STATE_ENCODER_CHANGED(x) RESET_TXN_STATE_ENCODER_CHANGED_(x)
-    LST_DO(RESET_TXN_STATE_ENCODER_CHANGED, (;), static, dynamic, participants, extra);
-#undef RESET_TXN_STATE_ENCODER_CHANGED
-#undef RESET_TXN_STATE_ENCODER_CHANGED_
-    txn_free_route_ctx_.init_before_handle_request(tx_desc_);
+    // preapre baseline for the following executing stmt/cmd
+    prep_txn_free_route_baseline(false);
   }
 }
 
 void ObSQLSessionInfo::set_txn_free_route(bool txn_free_route)
 {
   txn_free_route_ctx_.reset_audit_record();
-  txn_free_route_ctx_.set_proxy_support(txn_free_route);
+  txn_free_route_ctx_.init_before_update_state(txn_free_route);
 }
 
 bool ObSQLSessionInfo::can_txn_free_route() const
@@ -2889,8 +2891,14 @@ int ObControlInfoEncoder::deserialize(ObSQLSessionInfo &sess, const char *buf, c
     LOG_WARN("failed to resolve set by sess", K(ret));
   } else {
     sess.set_flt_control_info(con);
-    sess.set_send_control_info(false);
     sess.set_coninfo_set_by_sess(static_cast<bool>(setby_sess));
+    // if control info not changed or control info not set, not need to feedback
+    if (con == sess.get_control_info() || !sess.get_control_info().is_valid()) {
+      // not need to feedback
+      sess.set_send_control_info(true);
+      sess.get_control_info_encoder().is_changed_ = false;
+    }
+
     LOG_TRACE("deserialize control info", K(sess.get_sessid()), K(sess.get_control_info()));
   }
   return ret;

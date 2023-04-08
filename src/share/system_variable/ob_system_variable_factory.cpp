@@ -134,6 +134,7 @@ const char *ObSysVarFactory::SYS_VAR_NAMES_SORTED_BY_NAME[] = {
   "_ob_proxy_session_temporary_table_used",
   "_ob_px_bcast_optimization",
   "_ob_px_slave_mapping_threshold",
+  "_optimizer_gather_stats_on_load",
   "_optimizer_null_aware_antijoin",
   "_px_broadcast_fudge_factor",
   "_px_dist_agg_partial_rollup_pushdown",
@@ -261,7 +262,6 @@ const char *ObSysVarFactory::SYS_VAR_NAMES_SORTED_BY_NAME[] = {
   "ob_route_policy",
   "ob_safe_weak_read_snapshot",
   "ob_sql_audit_percentage",
-  "ob_sql_plan_memory_percentage",
   "ob_sql_work_area_percentage",
   "ob_statement_trace_id",
   "ob_tcp_invited_nodes",
@@ -270,7 +270,6 @@ const char *ObSysVarFactory::SYS_VAR_NAMES_SORTED_BY_NAME[] = {
   "ob_trx_idle_timeout",
   "ob_trx_lock_timeout",
   "ob_trx_timeout",
-  "online_opt_stat_gather",
   "optimizer_capture_sql_plan_baselines",
   "optimizer_use_sql_plan_baselines",
   "parallel_servers_target",
@@ -360,6 +359,7 @@ const ObSysVarClassType ObSysVarFactory::SYS_VAR_IDS_SORTED_BY_NAME[] = {
   SYS_VAR__OB_PROXY_SESSION_TEMPORARY_TABLE_USED,
   SYS_VAR__OB_PX_BCAST_OPTIMIZATION,
   SYS_VAR__OB_PX_SLAVE_MAPPING_THRESHOLD,
+  SYS_VAR__OPTIMIZER_GATHER_STATS_ON_LOAD,
   SYS_VAR__OPTIMIZER_NULL_AWARE_ANTIJOIN,
   SYS_VAR__PX_BROADCAST_FUDGE_FACTOR,
   SYS_VAR__PX_DIST_AGG_PARTIAL_ROLLUP_PUSHDOWN,
@@ -487,7 +487,6 @@ const ObSysVarClassType ObSysVarFactory::SYS_VAR_IDS_SORTED_BY_NAME[] = {
   SYS_VAR_OB_ROUTE_POLICY,
   SYS_VAR_OB_SAFE_WEAK_READ_SNAPSHOT,
   SYS_VAR_OB_SQL_AUDIT_PERCENTAGE,
-  SYS_VAR_OB_SQL_PLAN_MEMORY_PERCENTAGE,
   SYS_VAR_OB_SQL_WORK_AREA_PERCENTAGE,
   SYS_VAR_OB_STATEMENT_TRACE_ID,
   SYS_VAR_OB_TCP_INVITED_NODES,
@@ -496,7 +495,6 @@ const ObSysVarClassType ObSysVarFactory::SYS_VAR_IDS_SORTED_BY_NAME[] = {
   SYS_VAR_OB_TRX_IDLE_TIMEOUT,
   SYS_VAR_OB_TRX_LOCK_TIMEOUT,
   SYS_VAR_OB_TRX_TIMEOUT,
-  SYS_VAR_ONLINE_OPT_STAT_GATHER,
   SYS_VAR_OPTIMIZER_CAPTURE_SQL_PLAN_BASELINES,
   SYS_VAR_OPTIMIZER_USE_SQL_PLAN_BASELINES,
   SYS_VAR_PARALLEL_SERVERS_TARGET,
@@ -788,10 +786,9 @@ const char *ObSysVarFactory::SYS_VAR_NAMES_SORTED_BY_ID[] = {
   "innodb_strict_mode",
   "_windowfunc_optimization_settings",
   "ob_enable_rich_error_msg",
-  "ob_sql_plan_memory_percentage",
   "log_row_value_options",
   "ob_max_read_stale_time",
-  "online_opt_stat_gather",
+  "_optimizer_gather_stats_on_load",
   "_set_reverse_dblink_infos"
 };
 
@@ -1178,10 +1175,9 @@ int ObSysVarFactory::create_all_sys_vars()
         + sizeof(ObSysVarInnodbStrictMode)
         + sizeof(ObSysVarWindowfuncOptimizationSettings)
         + sizeof(ObSysVarObEnableRichErrorMsg)
-        + sizeof(ObSysVarObSqlPlanMemoryPercentage)
         + sizeof(ObSysVarLogRowValueOptions)
         + sizeof(ObSysVarObMaxReadStaleTime)
-        + sizeof(ObSysVarOnlineOptStatGather)
+        + sizeof(ObSysVarOptimizerGatherStatsOnLoad)
         + sizeof(ObSysVarSetReverseDblinkInfos)
         ;
     void *ptr = NULL;
@@ -3154,15 +3150,6 @@ int ObSysVarFactory::create_all_sys_vars()
       }
     }
     if (OB_SUCC(ret)) {
-      if (OB_ISNULL(sys_var_ptr = new (ptr)ObSysVarObSqlPlanMemoryPercentage())) {
-        ret = OB_ALLOCATE_MEMORY_FAILED;
-        LOG_ERROR("fail to new ObSysVarObSqlPlanMemoryPercentage", K(ret));
-      } else {
-        store_buf_[ObSysVarsToIdxMap::get_store_idx(static_cast<int64_t>(SYS_VAR_OB_SQL_PLAN_MEMORY_PERCENTAGE))] = sys_var_ptr;
-        ptr = (void *)((char *)ptr + sizeof(ObSysVarObSqlPlanMemoryPercentage));
-      }
-    }
-    if (OB_SUCC(ret)) {
       if (OB_ISNULL(sys_var_ptr = new (ptr)ObSysVarLogRowValueOptions())) {
         ret = OB_ALLOCATE_MEMORY_FAILED;
         LOG_ERROR("fail to new ObSysVarLogRowValueOptions", K(ret));
@@ -3181,12 +3168,12 @@ int ObSysVarFactory::create_all_sys_vars()
       }
     }
     if (OB_SUCC(ret)) {
-      if (OB_ISNULL(sys_var_ptr = new (ptr)ObSysVarOnlineOptStatGather())) {
+      if (OB_ISNULL(sys_var_ptr = new (ptr)ObSysVarOptimizerGatherStatsOnLoad())) {
         ret = OB_ALLOCATE_MEMORY_FAILED;
-        LOG_ERROR("fail to new ObSysVarOnlineOptStatGather", K(ret));
+        LOG_ERROR("fail to new ObSysVarOptimizerGatherStatsOnLoad", K(ret));
       } else {
-        store_buf_[ObSysVarsToIdxMap::get_store_idx(static_cast<int64_t>(SYS_VAR_ONLINE_OPT_STAT_GATHER))] = sys_var_ptr;
-        ptr = (void *)((char *)ptr + sizeof(ObSysVarOnlineOptStatGather));
+        store_buf_[ObSysVarsToIdxMap::get_store_idx(static_cast<int64_t>(SYS_VAR__OPTIMIZER_GATHER_STATS_ON_LOAD))] = sys_var_ptr;
+        ptr = (void *)((char *)ptr + sizeof(ObSysVarOptimizerGatherStatsOnLoad));
       }
     }
     if (OB_SUCC(ret)) {
@@ -5622,17 +5609,6 @@ int ObSysVarFactory::create_sys_var(ObSysVarClassType sys_var_id, ObBasicSysVar 
       }
       break;
     }
-    case SYS_VAR_OB_SQL_PLAN_MEMORY_PERCENTAGE: {
-      void *ptr = NULL;
-      if (OB_ISNULL(ptr = allocator_.alloc(sizeof(ObSysVarObSqlPlanMemoryPercentage)))) {
-        ret = OB_ALLOCATE_MEMORY_FAILED;
-        LOG_ERROR("fail to alloc memory", K(ret), K(sizeof(ObSysVarObSqlPlanMemoryPercentage)));
-      } else if (OB_ISNULL(sys_var_ptr = new (ptr)ObSysVarObSqlPlanMemoryPercentage())) {
-        ret = OB_ALLOCATE_MEMORY_FAILED;
-        LOG_ERROR("fail to new ObSysVarObSqlPlanMemoryPercentage", K(ret));
-      }
-      break;
-    }
     case SYS_VAR_LOG_ROW_VALUE_OPTIONS: {
       void *ptr = NULL;
       if (OB_ISNULL(ptr = allocator_.alloc(sizeof(ObSysVarLogRowValueOptions)))) {
@@ -5655,14 +5631,14 @@ int ObSysVarFactory::create_sys_var(ObSysVarClassType sys_var_id, ObBasicSysVar 
       }
       break;
     }
-    case SYS_VAR_ONLINE_OPT_STAT_GATHER: {
+    case SYS_VAR__OPTIMIZER_GATHER_STATS_ON_LOAD: {
       void *ptr = NULL;
-      if (OB_ISNULL(ptr = allocator_.alloc(sizeof(ObSysVarOnlineOptStatGather)))) {
+      if (OB_ISNULL(ptr = allocator_.alloc(sizeof(ObSysVarOptimizerGatherStatsOnLoad)))) {
         ret = OB_ALLOCATE_MEMORY_FAILED;
-        LOG_ERROR("fail to alloc memory", K(ret), K(sizeof(ObSysVarOnlineOptStatGather)));
-      } else if (OB_ISNULL(sys_var_ptr = new (ptr)ObSysVarOnlineOptStatGather())) {
+        LOG_ERROR("fail to alloc memory", K(ret), K(sizeof(ObSysVarOptimizerGatherStatsOnLoad)));
+      } else if (OB_ISNULL(sys_var_ptr = new (ptr)ObSysVarOptimizerGatherStatsOnLoad())) {
         ret = OB_ALLOCATE_MEMORY_FAILED;
-        LOG_ERROR("fail to new ObSysVarOnlineOptStatGather", K(ret));
+        LOG_ERROR("fail to new ObSysVarOptimizerGatherStatsOnLoad", K(ret));
       }
       break;
     }

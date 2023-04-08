@@ -92,7 +92,7 @@ int ForeignKeyHandle::do_handle(ObTableModifyOp &op,
             //  1. handling update operator and
             //  2. foreign key constraint is self reference
             // need to change %new_row and %old_row
-            //   (see https://aone.alibaba-inc.com/issue/17476162)
+            //   (see
             // xxx_row_res_info helps to restore row. restore row before get_next_row()
             //op.fk_self_ref_row_res_infos_.reset();
             for (int64_t i = 0; OB_SUCC(ret) && i < fk_arg.columns_.count(); i++) {
@@ -355,7 +355,7 @@ int ForeignKeyHandle::cascade(ObTableModifyOp &op,
       LOG_WARN("failed to begin nested session", K(ret));
     } else {
       // must call end_nested_session() if begin_nested_session() success.
-      // https://work.aone.alibaba-inc.com/issue/29621871
+      //
       // skip modify_ctx.set_foreign_key_cascade when cascade update and self ref.
       if (!(fk_arg.is_self_ref_ && !new_row.empty()) &&
           OB_FAIL(op.set_foreign_key_cascade(true))) {
@@ -535,7 +535,7 @@ ObTableModifyOp::ObTableModifyOp(ObExecContext &ctx,
 {
   obj_print_params_ = CREATE_OBJ_PRINT_PARAM(ctx_.get_my_session());
   obj_print_params_.need_cast_expr_ = true;
-  // bugfix:https://work.aone.alibaba-inc.com/issue/36658497
+  // bugfix:
   // in NO_BACKSLASH_ESCAPES, obj_print_sql<ObVarcharType> won't escape.
   // We use skip_escape_ to indicate this case. It will finally be passed to ObHexEscapeSqlStr.
   GET_SQL_MODE_BIT(IS_NO_BACKSLASH_ESCAPES, ctx_.get_my_session()->get_sql_mode(), obj_print_params_.skip_escape_);
@@ -701,13 +701,16 @@ int ObTableModifyOp::inner_close()
     }
   }
   dml_modify_rows_.clear();
-  // Release the hash sets created at root ctx for delete distinct check
-  if (OB_SUCC(ret) && get_exec_ctx().is_root_ctx()) {
+  // Release the hash sets created at fk root ctx for delete distinct checks
+  if (OB_SUCC(ret) && get_exec_ctx().is_fk_root_ctx()) {
     DASDelCtxList& del_ctx_list = get_exec_ctx().get_das_ctx().get_das_del_ctx_list();
     DASDelCtxList::iterator iter = del_ctx_list.begin();
     for (;  OB_SUCC(ret)&& iter != del_ctx_list.end(); iter++) {
       DmlRowkeyDistCtx del_ctx = *iter;
-      del_ctx.deleted_rows_->destroy();
+      if (del_ctx.deleted_rows_ != nullptr) {
+        del_ctx.deleted_rows_->destroy();
+        del_ctx.deleted_rows_ = nullptr;
+      }
     }
     del_ctx_list.destroy();
   }
@@ -755,7 +758,9 @@ int ObTableModifyOp::inner_rescan()
 
 int ObTableModifyOp::check_need_exec_single_row() {
   int ret = OB_SUCCESS;
-  execute_single_row_ = false;
+  if (MY_SPEC.is_returning_ && need_foreign_key_checks()) {
+    execute_single_row_ = true;
+  }
   return ret;
 }
 
@@ -1080,10 +1085,8 @@ int ObTableModifyOp::submit_all_dml_task()
       LOG_WARN("execute all dml das task failed", K(ret));
     } else if (OB_FAIL(dml_rtctx_.das_ref_.close_all_task())) {
       LOG_WARN("close all das task failed", K(ret));
-    } else if (!execute_single_row_ && OB_FAIL(ObDMLService::handle_after_row_processing_batch(&get_dml_modify_row_list()))) {
+    } else if (OB_FAIL(ObDMLService::handle_after_row_processing(execute_single_row_, &get_dml_modify_row_list()))) {
       LOG_WARN("perform batch foreign key constraints and after row trigger failed", K(ret));
-    } else if (execute_single_row_ && OB_FAIL(ObDMLService::handle_after_row_processing(&get_dml_modify_row_list()))) {
-      LOG_WARN("perform single row foreign key constraints and after row trigger failed", K(ret));
     } else {
       dml_modify_rows_.clear();
       dml_rtctx_.reuse();
@@ -1098,9 +1101,16 @@ int ObTableModifyOp::submit_all_dml_task()
 int ObTableModifyOp::discharge_das_write_buffer()
 {
   int ret = OB_SUCCESS;
-  if (dml_rtctx_.das_ref_.get_das_mem_used() >= das::OB_DAS_MAX_TOTAL_PACKET_SIZE || execute_single_row_) {
-    LOG_INFO("DASWriteBuffer full or need single row execution, now to write storage",
-             "buffer memory", dml_rtctx_.das_ref_.get_das_alloc().used(), K(execute_single_row_));
+  int64_t simulate_buffer_size = - EVENT_CALL(EventTable::EN_DAS_DML_BUFFER_OVERFLOW);
+  int64_t buffer_size_limit = is_meta_tenant(tenant_id_) ? das::OB_DAS_MAX_META_TENANT_PACKET_SIZE : das::OB_DAS_MAX_TOTAL_PACKET_SIZE;
+  if (OB_UNLIKELY(simulate_buffer_size > 0)) {
+    buffer_size_limit = simulate_buffer_size;
+  }
+  if (dml_rtctx_.get_cached_row_size() >= buffer_size_limit) {
+    LOG_INFO("DASWriteBuffer full, now to write storage",
+             "buffer memory", dml_rtctx_.das_ref_.get_das_alloc().used(), K(dml_rtctx_.get_cached_row_size()));
+    ret = submit_all_dml_task();
+  } else if (execute_single_row_) {
     ret = submit_all_dml_task();
   }
   return ret;

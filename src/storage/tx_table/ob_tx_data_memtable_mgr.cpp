@@ -111,6 +111,7 @@ int ObTxDataMemtableMgr::release_head_memtable_(memtable::ObIMemtable *imemtable
     const int64_t idx = get_memtable_idx(memtable_head_);
     if (nullptr != tables_[idx] && memtable == tables_[idx]) {
       memtable->set_state(ObTxDataMemtable::State::RELEASED);
+      memtable->set_release_time();
       STORAGE_LOG(INFO, "tx data memtable mgr release head memtable", KPC(memtable));
       release_head_memtable();
     } else {
@@ -140,17 +141,18 @@ int ObTxDataMemtableMgr::create_memtable(const SCN clog_checkpoint_scn,
     STORAGE_LOG(WARN, "slice_allocator_ has not been set.");
   } else {
     MemMgrWLockGuard lock_guard(lock_);
-    if (OB_FAIL(create_memtable_(clog_checkpoint_scn, schema_version))) {
+    if (OB_FAIL(create_memtable_(clog_checkpoint_scn, schema_version, ObTxDataHashMap::DEFAULT_BUCKETS_CNT))) {
       STORAGE_LOG(WARN, "create memtable fail.", KR(ret));
     } else {
       // create memtable success
     }
   }
-
   return ret;
 }
 
-int ObTxDataMemtableMgr::create_memtable_(const SCN clog_checkpoint_scn, int64_t schema_version)
+int ObTxDataMemtableMgr::create_memtable_(const SCN clog_checkpoint_scn,
+                                          int64_t schema_version,
+                                          const int64_t buckets_cnt)
 {
   UNUSED(schema_version);
   int ret = OB_SUCCESS;
@@ -172,7 +174,7 @@ int ObTxDataMemtableMgr::create_memtable_(const SCN clog_checkpoint_scn, int64_t
   } else if (OB_ISNULL(tx_data_memtable)) {
     ret = OB_ERR_UNEXPECTED;
     STORAGE_LOG(ERROR, "dynamic cast failed", KR(ret), KPC(this));
-  } else if (OB_FAIL(tx_data_memtable->init(table_key, slice_allocator_, this))) {
+  } else if (OB_FAIL(tx_data_memtable->init(table_key, slice_allocator_, this, buckets_cnt))) {
     STORAGE_LOG(WARN, "memtable init fail.", KR(ret), KPC(tx_data_memtable));
   } else if (OB_FAIL(add_memtable_(handle))) {
     STORAGE_LOG(WARN, "add memtable fail.", KR(ret));
@@ -220,6 +222,7 @@ int ObTxDataMemtableMgr::freeze_()
   int64_t pre_memtable_tail = memtable_tail_;
   SCN clog_checkpoint_scn = SCN::base_scn();
   int64_t schema_version = 1;
+  int64_t new_buckets_cnt = ObTxDataHashMap::DEFAULT_BUCKETS_CNT;
 
   // FIXME : @gengli remove this condition after upper_trans_version is not needed
   if (get_memtable_count_() >= MAX_TX_DATA_MEMTABLE_CNT) {
@@ -238,8 +241,22 @@ int ObTxDataMemtableMgr::freeze_()
   } else if (0 == freeze_memtable->get_tx_data_count()) {
     ret = OB_STATE_NOT_MATCH;
     STORAGE_LOG(WARN, "tx data memtable is empty. do not need freeze.", KR(ret), KPC(freeze_memtable));
-  } else if (OB_FAIL(create_memtable_(clog_checkpoint_scn, schema_version))) {
-    STORAGE_LOG(WARN, "create memtable fail.", KR(ret), K(clog_checkpoint_scn), K(schema_version));
+  } else if (OB_FAIL(calc_new_memtable_buckets_cnt_(
+                 freeze_memtable->load_factory(), freeze_memtable->get_buckets_cnt(), new_buckets_cnt))) {
+    STORAGE_LOG(WARN,
+                "calculate new memtable buckets cnt failed",
+                KR(ret),
+                "load_factory", freeze_memtable->load_factory(),
+                "old_buckets_cnt", freeze_memtable->get_buckets_cnt(),
+                K(new_buckets_cnt));
+  } else if (OB_FAIL(create_memtable_(clog_checkpoint_scn, schema_version, new_buckets_cnt))) {
+    STORAGE_LOG(WARN,
+                "create memtable fail.",
+                KR(ret),
+                K(clog_checkpoint_scn),
+                K(schema_version),
+                "old_buckets_cnt", freeze_memtable->get_buckets_cnt(),
+                K(new_buckets_cnt));
   } else {
     ObTxDataMemtable *new_memtable = static_cast<ObTxDataMemtable *>(tables_[get_memtable_idx(memtable_tail_ - 1)]);
     if (OB_ISNULL(new_memtable) && OB_UNLIKELY(new_memtable->is_tx_data_memtable())) {
@@ -259,6 +276,7 @@ int ObTxDataMemtableMgr::freeze_()
       freeze_memtable->set_end_scn();
 
       freeze_memtable->set_state(ObTxDataMemtable::State::FREEZING);
+      freeze_memtable->set_freeze_time();
       new_memtable->set_start_scn(freeze_memtable->get_end_scn());
       new_memtable->set_state(ObTxDataMemtable::State::ACTIVE);
       STORAGE_LOG(INFO, "tx data memtable freeze success.", K(get_memtable_count_()),
@@ -275,6 +293,41 @@ int ObTxDataMemtableMgr::freeze_()
   }
 
   return ret;
+}
+
+int ObTxDataMemtableMgr::calc_new_memtable_buckets_cnt_(const double load_factory,
+                                                        const int64_t old_buckets_cnt,
+                                                        int64_t &new_buckets_cnt)
+{
+  // acquire the max memory which tx data memtable buckets can use
+  int64_t remain_memory = lib::get_tenant_memory_remain(MTL_ID());
+  int64_t buckets_size_limit = remain_memory >> 4; /* remain_memory * (1/16) */
+
+  int64_t expect_buckets_cnt = old_buckets_cnt;
+  if (load_factory > ObTxDataHashMap::LOAD_FACTORY_MAX_LIMIT &&
+      expect_buckets_cnt < ObTxDataHashMap::MAX_BUCKETS_CNT) {
+    expect_buckets_cnt <<= 1;
+  } else if (load_factory < ObTxDataHashMap::LOAD_FACTORY_MIN_LIMIT &&
+             expect_buckets_cnt > ObTxDataHashMap::MIN_BUCKETS_CNT) {
+    expect_buckets_cnt >>= 1;
+  }
+
+  int64_t expect_buckets_size = expect_buckets_cnt * sizeof(ObTxDataHashMap::ObTxDataHashHeader);
+
+  while (expect_buckets_size > buckets_size_limit && expect_buckets_cnt > ObTxDataHashMap::MIN_BUCKETS_CNT) {
+    expect_buckets_cnt >>= 1;
+    expect_buckets_size = expect_buckets_cnt * sizeof(ObTxDataHashMap::ObTxDataHashHeader);
+  }
+
+  new_buckets_cnt = expect_buckets_cnt;
+  STORAGE_LOG(INFO,
+              "finish calculate new tx data memtable buckets cnt",
+              K(ls_id_),
+              K(load_factory),
+              K(old_buckets_cnt),
+              K(new_buckets_cnt),
+              K(remain_memory));
+  return OB_SUCCESS;
 }
 
 int ObTxDataMemtableMgr::get_active_memtable(ObTableHandleV2 &handle) const

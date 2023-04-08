@@ -206,9 +206,9 @@ int ObLSRestoreHandler::handle_execute_over(
       state_handler_->set_retry_flag();
       result_mgr_.set_result(result, task_id, ObLSRestoreResultMgr::RestoreFailedType::DATA_RESTORE_FAILED_TYPE);
       LOG_WARN("restore sys tablets dag failed, need retry", K(ret));
-    } else if (OB_TABLET_NOT_EXIST == result && status.is_quick_restore()) {
+    } else if (OB_TABLET_NOT_EXIST == result) {
   // TODO: Transfer sequence in 4.1 needs to be compared when result is OB_TABLET_NOT_EXIST
-      LOG_WARN("tablet has been deleted, no need to record err info", K(restore_failed_tablets));
+      LOG_INFO("tablet has been deleted, no need to record err info", K(restore_failed_tablets));
     } else if (common::ObRole::FOLLOWER == role && result_mgr_.can_retrieable_err(result)) {
       LOG_INFO("follower met retrieable err, no need to record", K(result));
     } else {
@@ -293,6 +293,12 @@ int ObLSRestoreHandler::check_before_do_restore_(bool &can_do_restore)
   } else if (OB_FAIL(ls_->get_restore_status(restore_status))) {
     LOG_WARN("fail to get_restore_status", K(ret), KPC(ls_));
   } else if (restore_status.is_restore_none()) {
+    lib::ObMutexGuard guard(mtx_);
+    if (OB_NOT_NULL(state_handler_)) {
+      state_handler_->~ObILSRestoreState();
+      allocator_.free(state_handler_);
+      state_handler_ = nullptr;
+    }
   } else if (restore_status.is_restore_failed()) {
     if (REACH_TIME_INTERVAL(10 * 60 * 1000 * 1000)) {
       LOG_WARN("ls restore failed, tenant restore can't continue", K(result_mgr_));
@@ -585,6 +591,24 @@ int ObLSRestoreHandler::check_tablet_restore_finish_(
   return ret;
 }
 
+int ObLSRestoreHandler::check_tablet_deleted(const ObTabletHandle &tablet_handle, bool &is_deleted)
+{
+  int ret = OB_SUCCESS;
+  // TODO(chongrong.th) need to think about transfer out deleted in 4.2
+  is_deleted = false;
+  ObTabletStatus::Status tablet_status = ObTabletStatus::Status::MAX;
+  if (!tablet_handle.is_valid()) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid tablet handle", K(ret));
+  } else if (OB_FAIL(tablet_handle.get_obj()->get_tablet_status(tablet_status))) {
+    LOG_WARN("failed to get tablet status", K(ret));
+  } else if (ObTabletStatus::Status::DELETED == tablet_status) {
+    is_deleted = true;
+    const ObTabletID tablet_id = tablet_handle.get_obj()->get_tablet_meta().tablet_id_;
+    LOG_INFO("tablet deleted", K(tablet_id), K(tablet_status));
+  }
+  return ret;
+}
 void ObLSRestoreHandler::wakeup()
 {
   int ret = OB_SUCCESS;
@@ -971,12 +995,13 @@ int ObILSRestoreState::reload_tablet_()
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("ls_tablet_svr is nullptr", K(ret));
   } else {
-    ObLSTabletIterator iterator(ObTabletCommon::DIRECT_GET_COMMITTED_TABLET_TIMEOUT_US);
+    ObLSTabletIterator iterator(ObTabletCommon::NO_CHECK_GET_TABLET_TIMEOUT_US);
     if (OB_FAIL(ls_tablet_svr->build_tablet_iter(iterator))) {
       LOG_WARN("fail to build tablet iterator", K(ret), KPC(ls_));
     }
 
     while (OB_SUCC(ret)) {
+      bool is_deleted = false;
       if (OB_FAIL(iterator.get_next_tablet(tablet_handle))) {
         if (OB_ITER_END == ret) {
           ret = OB_SUCCESS;
@@ -984,6 +1009,9 @@ int ObILSRestoreState::reload_tablet_()
         } else {
           LOG_WARN("fail to get next tablet", K(ret));
         }
+      } else if (OB_FAIL(ObLSRestoreHandler::check_tablet_deleted(tablet_handle, is_deleted))) {
+        LOG_WARN("failed to check tablet need schedule restore", K(ret), K(tablet_handle));
+      } else if (is_deleted) {
       } else if (OB_ISNULL(tablet = tablet_handle.get_obj())) {
         ret = OB_INVALID_ARGUMENT;
         LOG_WARN("tablet is nullptr", K(ret));
@@ -1063,7 +1091,7 @@ int ObILSRestoreState::upload_wait_restore_tablet_()
   int ret = OB_SUCCESS;
   ObTabletHandle tablet_handle;
   ObLSTabletService *ls_tablet_svr = nullptr;
-  ObLSTabletIterator iterator(ObTabletCommon::DIRECT_GET_COMMITTED_TABLET_TIMEOUT_US); // restore only needs to see the created tabelts
+  ObLSTabletIterator iterator(ObTabletCommon::NO_CHECK_GET_TABLET_TIMEOUT_US);
   ObTablet *tablet = nullptr;
   ObSArray<ObTabletID> tablet_ids;
 
@@ -1076,6 +1104,7 @@ int ObILSRestoreState::upload_wait_restore_tablet_()
     bool is_finish = false;
     while (OB_SUCC(ret)) {
       is_finish = false;
+      bool is_deleted = false;
       if (OB_FAIL(iterator.get_next_tablet(tablet_handle))) {
         if (OB_ITER_END == ret) {
           ret = OB_SUCCESS;
@@ -1083,6 +1112,9 @@ int ObILSRestoreState::upload_wait_restore_tablet_()
         } else {
           LOG_WARN("fail to get next tablet", K(ret));
         }
+      } else if (OB_FAIL(ObLSRestoreHandler::check_tablet_deleted(tablet_handle, is_deleted))) {
+        LOG_WARN("failed to check tablet need schedule restore", K(ret), K(tablet_handle));
+      } else if (is_deleted) {
       } else if (nullptr == (tablet = tablet_handle.get_obj())) {
         ret = OB_INVALID_ARGUMENT;
         LOG_WARN("tablet is nullptr", K(ret));

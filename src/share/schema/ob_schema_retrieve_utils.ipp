@@ -1159,7 +1159,7 @@ int ObSchemaRetrieveUtils::fill_table_schema(
      * Here comes a compatibility problem:
      * row_store_type's default value is defined as flat_row_store when cluster is upgraded from ver 1.4.x
      * and is defined as encoding_row_store when cluster is upgraded from ver 2.x.
-     * (https://code.aone.alibaba-inc.com/oceanbase/oceanbase/codereview/1024990)
+     * (
      *
      * Because we don't actually record row_store_type by DML when cluster is in upgradation,
      * row_store_type's value is different according to different hardcoded row_store_type's default value
@@ -1284,6 +1284,7 @@ int ObSchemaRetrieveUtils::fill_table_schema(
     EXTRACT_INT_FIELD_TO_CLASS_MYSQL_WITH_DEFAULT_VALUE(result, table_flags, table_schema, uint64_t,
         true, ignore_column_error, 0);
     EXTRACT_INT_FIELD_TO_CLASS_MYSQL_WITH_DEFAULT_VALUE(result, object_status, table_schema, int64_t, true, ignore_column_error, static_cast<int64_t> (ObObjectStatus::VALID));
+    EXTRACT_INT_FIELD_TO_CLASS_MYSQL_WITH_DEFAULT_VALUE(result, truncate_version, table_schema, int64_t, true, ignore_column_error, common::OB_INVALID_VERSION);
   }
   if (OB_SUCC(ret) && OB_FAIL(fill_sys_table_lob_tid(table_schema))) {
     SHARE_SCHEMA_LOG(WARN, "fail to fill lob table id for inner table", K(ret), K(table_schema.get_table_id()));
@@ -3844,6 +3845,7 @@ int ObSchemaRetrieveUtils::fill_table_schema(const uint64_t tenant_id,
     EXTRACT_INT_FIELD_TO_CLASS_MYSQL_WITH_DEFAULT_VALUE(result, tablet_id, table_schema, uint64_t, true, ignore_column_error, 0);
     ignore_column_error = true;
     EXTRACT_INT_FIELD_TO_CLASS_MYSQL_WITH_DEFAULT_VALUE(result, object_status, table_schema, int64_t, true, ignore_column_error, ObObjectStatus::VALID);
+    EXTRACT_INT_FIELD_TO_CLASS_MYSQL_WITH_DEFAULT_VALUE(result, truncate_version, table_schema, int64_t, true, ignore_column_error, common::OB_INVALID_VERSION);
   }
   return ret;
 }
@@ -4218,10 +4220,10 @@ int ObSchemaRetrieveUtils::fill_base_part_info(
     EXTRACT_INT_FIELD_TO_CLASS_MYSQL(result, part_id, partition, int64_t);
   }
 
-  if (check_deleted) {
+  if (OB_SUCC(ret) && check_deleted) {
     EXTRACT_INT_FIELD_MYSQL(result, "is_deleted", is_deleted, bool);
   }
-  if (!is_deleted) {
+  if (OB_SUCC(ret) && !is_deleted) {
     EXTRACT_INT_FIELD_TO_CLASS_MYSQL(result, schema_version, partition, int64_t);
     ObString bhigh_bound_val;
     ObString blist_val;
@@ -4251,12 +4253,26 @@ int ObSchemaRetrieveUtils::fill_base_part_info(
         ret = OB_SUCCESS;
       } else if (OB_SUCCESS != ret) {
         SQL_LOG(WARN, "fail to get varchar column 'b_list_val' of base_part_info.", K(ret));
-      } else if (OB_FAIL(partition.set_list_vector_values_with_hex_str(blist_val))) {
-        SHARE_SCHEMA_LOG(WARN, "Failed to set list val to partition", K(ret));
+      } else {
+        // bugfix: issue/48579037
+        // In 4.x, tablegroup_id/table_id is in the same scope, so we can distinguish table and tablegroup based on object_id.
+        bool is_oracle_mode = false;
+        if (is_sys_tablegroup_id(table_id)) {
+          is_oracle_mode = false;
+        } else if (OB_FAIL(ObCompatModeGetter::check_is_oracle_mode_with_table_id(
+                   tenant_id, table_id, is_oracle_mode))) {
+          LOG_WARN("fail to check oracle mode", KR(ret), K(tenant_id), K(table_id));
+        }
+        lib::CompatModeGuard guard(is_oracle_mode ?
+                                   lib::Worker::CompatMode::ORACLE :
+                                   lib::Worker::CompatMode::MYSQL);
+        if (FAILEDx(partition.set_list_vector_values_with_hex_str(blist_val))) {
+          SHARE_SCHEMA_LOG(WARN, "Failed to set list val to partition", K(ret));
+        }
       }
     }
     bool ignore_column_error = ObSchemaService::g_ignore_column_retrieve_error_;
-    if (!(is_subpart_def && is_subpart_template)) {
+    if (OB_SUCC(ret) && !(is_subpart_def && is_subpart_template)) {
       EXTRACT_INT_FIELD_TO_CLASS_MYSQL_WITH_DEFAULT_VALUE(result, tablet_id, partition, uint64_t, true, ignore_column_error, 0);
     }
   } else { }//do nothing

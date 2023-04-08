@@ -110,7 +110,7 @@ TEST(sc, usability)
 void *cur_stack_addr = nullptr;
 size_t cur_stack_size = 0;
 int stack_change_cnt = 0;
-#define STACK_PER_EXTEND_SIZE lib::ProtectedStackAllocator::adjust_size(STACK_PER_EXTEND)
+#define STACK_PER_EXTEND_SIZE STACK_PER_EXTEND
 const int64_t s_size = STACK_PER_EXTEND_SIZE;
 int test(int &i, int once_invoke_hold)
 {
@@ -141,7 +141,7 @@ int test(int &i, int once_invoke_hold)
       ret = OB_SUCCESS;
     } else {
       char buf[once_invoke_hold];
-      MEMSET(buf, 0, once_invoke_hold);
+      memset(buf, reinterpret_cast<std::uintptr_t>(&buf[0]) & 0xFF, once_invoke_hold); // disable compiler optimize out
       ret = SMART_CALL(test(--i, once_invoke_hold));
       void *stack_addr_after = nullptr;
       size_t stack_size_after = 0;

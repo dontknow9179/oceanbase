@@ -20,6 +20,7 @@
 #include "common/ob_store_format.h"
 #include "observer/ob_server_struct.h"
 #include "storage/tx/ob_trans_service.h"
+#include "share/ls/ob_ls_status_operator.h"
 
 namespace oceanbase
 {
@@ -78,6 +79,7 @@ int ObDDLArg::assign(const ObDDLArg &other)
     sync_from_primary_ = other.sync_from_primary_;
     parallelism_ = other.parallelism_;
     task_id_ = other.task_id_;
+    consumer_group_id_ = other.consumer_group_id_;
   }
   return ret;
 }
@@ -515,6 +517,7 @@ int ObUpdateDDLTaskActiveTimeArg::assign(const ObUpdateDDLTaskActiveTimeArg &arg
 bool ObCreateHiddenTableArg::is_valid() const
 {
   return (OB_INVALID_ID != tenant_id_
+          && OB_INVALID_TENANT_ID != exec_tenant_id_
           && OB_INVALID_ID != table_id_
           && OB_INVALID_ID != dest_tenant_id_
           && share::DDL_INVALID != ddl_type_);
@@ -532,6 +535,7 @@ int ObCreateHiddenTableArg::assign(const ObCreateHiddenTableArg &arg)
   } else {
     tenant_id_ = arg.tenant_id_;
     table_id_ = arg.table_id_;
+    consumer_group_id_ = arg.consumer_group_id_;
     dest_tenant_id_ = arg.dest_tenant_id_;
     session_id_ = arg.session_id_;
     parallelism_ = arg.parallelism_;
@@ -550,10 +554,13 @@ OB_DEF_SERIALIZE(ObCreateHiddenTableArg)
   if (!is_valid()) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid argument", K(ret));
+  } else if (OB_FAIL(ObDDLArg::serialize(buf, buf_len, pos))) {
+    LOG_WARN("fail to serialize DDLArg", K(ret), K(buf_len), K(pos));
   } else {
     LST_DO_CODE(OB_UNIS_ENCODE,
                 tenant_id_,
                 table_id_,
+                consumer_group_id_,
                 dest_tenant_id_,
                 session_id_,
                 parallelism_,
@@ -575,9 +582,13 @@ OB_DEF_SERIALIZE(ObCreateHiddenTableArg)
 OB_DEF_DESERIALIZE(ObCreateHiddenTableArg)
 {
   int ret = OB_SUCCESS;
-  LST_DO_CODE(OB_UNIS_DECODE,
+  if (OB_FAIL(ObDDLArg::deserialize(buf, data_len, pos))) {
+    LOG_WARN("fail to deserialize DDLArg", K(ret), K(data_len), K(pos));
+  } else {
+    LST_DO_CODE(OB_UNIS_DECODE,
               tenant_id_,
               table_id_,
+              consumer_group_id_,
               dest_tenant_id_,
               session_id_,
               parallelism_,
@@ -585,7 +596,6 @@ OB_DEF_DESERIALIZE(ObCreateHiddenTableArg)
               sql_mode_,
               tz_info_,
               tz_info_wrap_);
-  if (OB_SUCC(ret)) {
     ObString tmp_string;
     char *tmp_ptr[ObNLSFormatEnum::NLS_MAX] = {};
     for (int64_t i = 0; OB_SUCC(ret) && i < ObNLSFormatEnum::NLS_MAX; i++) {
@@ -617,9 +627,11 @@ OB_DEF_SERIALIZE_SIZE(ObCreateHiddenTableArg)
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid argument", K(ret));
   } else {
+    len += ObDDLArg::get_serialize_size();
     LST_DO_CODE(OB_UNIS_ADD_LEN,
                 tenant_id_,
                 table_id_,
+                consumer_group_id_,
                 dest_tenant_id_,
                 session_id_,
                 parallelism_,
@@ -895,7 +907,8 @@ OB_SERIALIZE_MEMBER(ObDDLArg,
                     sync_from_primary_,
                     based_schema_object_infos_,
                     parallelism_,
-                    task_id_);
+                    task_id_,
+                    consumer_group_id_);
 
 //////////////////////////////////////////////
 //
@@ -5358,6 +5371,36 @@ OB_SERIALIZE_MEMBER(TenantServerUnitConfig,
                     if_not_grant_,
                     unit_id_);
 
+int ObForceSetLSAsSingleReplicaArg::init(const uint64_t tenant_id, const share::ObLSID &ls_id)
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(OB_INVALID_TENANT_ID == tenant_id
+                  || !ls_id.is_valid())) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", KR(ret), K(tenant_id), K(ls_id));
+  } else {
+    tenant_id_ = tenant_id;
+    ls_id_ = ls_id;
+  }
+  return ret;
+}
+
+bool ObForceSetLSAsSingleReplicaArg::is_valid() const
+{
+  return OB_INVALID_TENANT_ID != tenant_id_ && ls_id_.is_valid();
+}
+
+int ObForceSetLSAsSingleReplicaArg::assign(const ObForceSetLSAsSingleReplicaArg &other)
+{
+  int ret = OB_SUCCESS;
+  if (this != &other) {
+    tenant_id_ = other.tenant_id_;
+    ls_id_ = other.ls_id_;
+  }
+  return ret;
+}
+OB_SERIALIZE_MEMBER(ObForceSetLSAsSingleReplicaArg, tenant_id_, ls_id_);
+
 OB_SERIALIZE_MEMBER(ObGetLSSyncScnArg, tenant_id_, ls_id_, check_sync_to_latest_);
 
 bool ObGetLSSyncScnArg::is_valid() const
@@ -5526,7 +5569,7 @@ int ObRecoverTenantArg::init(
     const SCN &recovery_until_scn)
 {
   int ret = OB_SUCCESS;
-  if (OB_UNLIKELY(OB_INVALID_TENANT_ID == exec_tenant_id || !is_valid_(type, recovery_until_scn))) {
+  if (OB_UNLIKELY(OB_INVALID_TENANT_ID == exec_tenant_id || !is_valid(type, recovery_until_scn))) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid argument", KR(ret), K(exec_tenant_id), K(type), K(recovery_until_scn));
   } else {
@@ -6357,9 +6400,9 @@ OB_SERIALIZE_MEMBER(ObLogReqUnloadProxyResponse, err_);
 OB_SERIALIZE_MEMBER(ObLogReqLoadProxyProgressRequest, agency_addr_seq_, principal_addr_seq_);
 OB_SERIALIZE_MEMBER(ObLogReqLoadProxyProgressResponse, err_, progress_);
 
-OB_SERIALIZE_MEMBER(ObDDLBuildSingleReplicaRequestArg, tenant_id_, ls_id_, source_tablet_id_, dest_tablet_id_, 
+OB_SERIALIZE_MEMBER(ObDDLBuildSingleReplicaRequestArg, tenant_id_, ls_id_, source_tablet_id_, dest_tablet_id_,
   source_table_id_, dest_schema_id_, schema_version_, snapshot_version_, ddl_type_, task_id_, execution_id_,
-  parallelism_, tablet_task_id_, cluster_version_);
+  parallelism_, tablet_task_id_, data_format_version_, consumer_group_id_);
 
 int ObDDLBuildSingleReplicaRequestArg::assign(const ObDDLBuildSingleReplicaRequestArg &other)
 {
@@ -6377,7 +6420,8 @@ int ObDDLBuildSingleReplicaRequestArg::assign(const ObDDLBuildSingleReplicaReque
   parallelism_ = other.parallelism_;
   execution_id_ = other.execution_id_;
   tablet_task_id_ = other.tablet_task_id_;
-  cluster_version_ = other.cluster_version_;
+  data_format_version_ = other.data_format_version_;
+  consumer_group_id_ = other.consumer_group_id_;
   return ret;
 }
 
@@ -7404,13 +7448,17 @@ OB_SERIALIZE_MEMBER(ObRpcRemoteWriteDDLCommitLogArg, tenant_id_, ls_id_, table_k
 bool ObCheckLSCanOfflineArg::is_valid() const
 {
   return OB_INVALID_TENANT_ID != tenant_id_
-         && id_.is_valid();
+         && id_.is_valid()
+         && (ls_is_tenant_dropping_status(current_ls_status_)
+             || ls_is_dropping_status(current_ls_status_)
+             || ls_is_empty_status(current_ls_status_)); //rpc from old version
 }
 
 void ObCheckLSCanOfflineArg::reset()
 {
   tenant_id_ = OB_INVALID_TENANT_ID;
   id_.reset();
+  current_ls_status_ = share::ObLSStatus::OB_LS_EMPTY;
 }
 
 int ObCheckLSCanOfflineArg::assign(const ObCheckLSCanOfflineArg &arg)
@@ -7421,16 +7469,19 @@ int ObCheckLSCanOfflineArg::assign(const ObCheckLSCanOfflineArg &arg)
   return ret;
 }
 int ObCheckLSCanOfflineArg::init(const uint64_t tenant_id,
-    const share::ObLSID &id)
+    const share::ObLSID &id,
+    const share::ObLSStatus &ls_status)
 {
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(OB_INVALID_TENANT_ID == tenant_id
-                  || !id.is_valid())) {
+                  || !id.is_valid()
+                  || (!ls_is_tenant_dropping_status(ls_status) && ! ls_is_dropping_status(ls_status)))) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid argument", KR(ret), K(tenant_id), K(id));
+    LOG_WARN("invalid argument", KR(ret), K(tenant_id), K(id), K(ls_status));
   } else {
     tenant_id_ = tenant_id;
     id_ = id;
+    current_ls_status_ = ls_status;
   }
   return ret;
 }
@@ -7438,11 +7489,11 @@ int ObCheckLSCanOfflineArg::init(const uint64_t tenant_id,
 DEF_TO_STRING(ObCheckLSCanOfflineArg)
 {
   int64_t pos = 0;
-  J_KV(K_(tenant_id), K_(id));
+  J_KV(K_(tenant_id), K_(id), K_(current_ls_status));
   return pos;
 }
 
-OB_SERIALIZE_MEMBER(ObCheckLSCanOfflineArg, tenant_id_, id_);
+OB_SERIALIZE_MEMBER(ObCheckLSCanOfflineArg, tenant_id_, id_, current_ls_status_);
 
 bool ObRegisterTxDataArg::is_valid() const
 {

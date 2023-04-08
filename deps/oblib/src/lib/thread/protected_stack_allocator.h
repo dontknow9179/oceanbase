@@ -41,10 +41,9 @@ class ProtectedStackAllocator
 public:
   void *alloc(const uint64_t tenant_id, const ssize_t size);
   void dealloc(void *ptr);
-  static ssize_t adjust_size(const ssize_t size);
   static ObStackHeader *stack_header(void *ptr);
-private:
   static ssize_t page_size();
+private:
   void *__alloc(const uint64_t tenant_id, const ssize_t size);
 };
 

@@ -132,7 +132,7 @@ int ObMPStmtPrepare::multiple_query_check(ObSQLSessionInfo &session,
           // 进入本分支，说明在multi_query中的某条query parse失败，如果不是语法错，则进入该分支
           // 如果当前query_count 为1， 则不断连接;如果大于1，
           // 则需要在发错误包之后断连接，防止客户端一直在等接下来的回包
-          // 这个改动是为了解决https://aone.alibaba-inc.com/project/81079/issue/8834973
+          // 这个改动是为了解决
           ret = parse_stat.fail_ret_;
           need_response_error = true;
         }
@@ -367,7 +367,7 @@ int ObMPStmtPrepare::check_and_refresh_schema(uint64_t login_tenant_id,
 
   if (login_tenant_id != effective_tenant_id) {
     // do nothing
-    // https://aone.alibaba-inc.com/issue/18698167
+    //
   } else if (OB_ISNULL(gctx_.schema_service_)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("null schema service", K(ret), K(gctx_));
@@ -403,6 +403,7 @@ int ObMPStmtPrepare::do_process(ObSQLSessionInfo &session,
   bool is_diagnostics_stmt = false;
   bool need_response_error = true;
   const ObString &sql = ctx_.multi_stmt_item_.get_sql();
+  ObPsStmtId inner_stmt_id = OB_INVALID_ID;
 
   /* !!!
    * 注意req_timeinfo_guard一定要放在result前面
@@ -448,6 +449,10 @@ int ObMPStmtPrepare::do_process(ObSQLSessionInfo &session,
           LOG_WARN("run stmt_query failed, check if need retry",
                    K(ret), K(cli_ret), K(retry_ctrl_.need_retry()), K(sql));
           ret = cli_ret;
+        } else if (common::OB_INVALID_ID != result.get_statement_id()
+                   && OB_FAIL(session.get_inner_ps_stmt_id(result.get_statement_id(), inner_stmt_id))) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("ps : get inner stmt id fail.", K(ret), K(result.get_statement_id()));
         } else {
           //监控项统计开始
           if (enable_perf_event) {
@@ -539,6 +544,7 @@ int ObMPStmtPrepare::do_process(ObSQLSessionInfo &session,
       audit_record.exec_record_.wait_time_end_ = total_wait_desc.time_waited_;
       audit_record.exec_record_.wait_count_end_ = total_wait_desc.total_waits_;
       audit_record.ps_stmt_id_ = result.get_statement_id();
+      audit_record.ps_inner_stmt_id_ = inner_stmt_id;
       audit_record.update_stage_stat();
       bool need_retry = (THIS_THWORKER.need_retry()
                          || RETRY_TYPE_NONE != retry_ctrl_.get_retry_type());

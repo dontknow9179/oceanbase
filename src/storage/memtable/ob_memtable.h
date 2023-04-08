@@ -313,7 +313,9 @@ public:
   int set_freezer(storage::ObFreezer *handler);
   storage::ObFreezer *get_freezer() { return freezer_; }
   int get_ls_id(share::ObLSID &ls_id);
-  void set_memtable_mgr(storage::ObTabletMemtableMgr *mgr) { memtable_mgr_ = mgr; }
+  void set_memtable_mgr(storage::ObTabletMemtableMgr *mgr) { ATOMIC_STORE(&memtable_mgr_, mgr); }
+  void clear_memtable_mgr() { ATOMIC_STORE(&memtable_mgr_, nullptr); }
+  storage::ObTabletMemtableMgr *get_memtable_mgr() { return ATOMIC_LOAD(&memtable_mgr_); }
   void set_freeze_clock(const uint32_t freeze_clock) { ATOMIC_STORE(&freeze_clock_, freeze_clock); }
   uint32_t get_freeze_clock() { return ATOMIC_LOAD(&freeze_clock_); }
   int set_emergency(const bool emergency);
@@ -345,7 +347,7 @@ public:
   inline void set_write_barrier() { write_barrier_ = true; }
   inline void unset_write_barrier() { write_barrier_ = false; }
   inline void set_read_barrier() { read_barrier_ = true; }
-  virtual int64_t inc_write_ref() override { return ATOMIC_AAF(&write_ref_cnt_, 1); }
+  virtual int64_t inc_write_ref() override { return inc_write_ref_(); }
   virtual int64_t dec_write_ref() override;
   virtual int64_t get_write_ref() const override { return ATOMIC_LOAD(&write_ref_cnt_); }
   inline void set_is_tablet_freeze() { is_tablet_freeze_ = true; }
@@ -371,6 +373,9 @@ public:
   ObMvccEngine &get_mvcc_engine() { return mvcc_engine_; }
   const ObMvccEngine &get_mvcc_engine() const { return mvcc_engine_; }
   OB_INLINE bool is_inited() const { return is_inited_;}
+  int64_t get_memtable_mgr_op_cnt() { return ATOMIC_LOAD(&memtable_mgr_op_cnt_); }
+  int64_t inc_memtable_mgr_op_cnt() { return ATOMIC_AAF(&memtable_mgr_op_cnt_, 1); }
+  int64_t dec_memtable_mgr_op_cnt() { return ATOMIC_SAF(&memtable_mgr_op_cnt_, 1); }
 
   /* freeze */
   virtual int set_frozen() override { local_allocator_.set_frozen(); return OB_SUCCESS; }
@@ -466,13 +471,16 @@ public:
                      bool &is_all_delay_cleanout,
                      int64_t &count);
   int dump2text(const char *fname);
-  INHERIT_TO_STRING_KV("ObITable", ObITable, KP(this), K_(timestamp), K_(state),
+  INHERIT_TO_STRING_KV("ObITable", ObITable, KP(this), KP_(memtable_mgr), K_(timestamp), K_(state),
                        K_(freeze_clock), K_(max_schema_version), K_(write_ref_cnt), K_(local_allocator),
                        K_(unsubmitted_cnt), K_(unsynced_cnt),
                        K_(logging_blocked), K_(unset_active_memtable_logging_blocked), K_(resolve_active_memtable_left_boundary),
                        K_(contain_hotspot_row), K_(max_end_scn), K_(rec_scn), K_(snapshot_version), K_(migration_clog_checkpoint_scn),
                        K_(is_tablet_freeze), K_(is_force_freeze), K_(contain_hotspot_row),
-                       K_(read_barrier), K_(is_flushed), K_(freeze_state));
+                       K_(read_barrier), K_(is_flushed), K_(freeze_state),
+                       K_(mt_stat_.frozen_time), K_(mt_stat_.ready_for_flush_time),
+                       K_(mt_stat_.create_flush_dag_time), K_(mt_stat_.release_time),
+                       K_(mt_stat_.last_print_time));
 private:
   static const int64_t OB_EMPTY_MEMSTORE_MAX_SIZE = 10L << 20; // 10MB
   int mvcc_write_(storage::ObStoreCtx &ctx,
@@ -526,6 +534,12 @@ private:
                                const int64_t last_compact_cnt,
                                const int64_t total_trans_node_count);
   bool ready_for_flush_();
+  int64_t inc_write_ref_();
+  int64_t dec_write_ref_();
+  int64_t inc_unsubmitted_cnt_();
+  int64_t dec_unsubmitted_cnt_();
+  int64_t inc_unsynced_cnt_();
+  int64_t dec_unsynced_cnt_();
 private:
   DISALLOW_COPY_AND_ASSIGN(ObMemtable);
   bool is_inited_;
@@ -542,6 +556,7 @@ private:
   int64_t pending_cb_cnt_; // number of transactions have to sync log
   int64_t unsubmitted_cnt_; // number of trans node to be submitted logs
   int64_t unsynced_cnt_; // number of trans node to be synced logs
+  int64_t memtable_mgr_op_cnt_; // number of operations for memtable_mgr
   bool logging_blocked_; // flag whether the memtable can submit log, cannot submit if true
   int64_t logging_blocked_start_time; // record the start time of logging blocked
   bool unset_active_memtable_logging_blocked_;
@@ -588,20 +603,26 @@ int ObMemtable::save_multi_source_data_unit(const T *const multi_source_data_uni
   } else {
     const MultiSourceDataUnitType &type = multi_source_data_unit->type();
     if (MemtableRefOp::INC_REF == ref_op) {
+      const_cast<T*>(multi_source_data_unit)->inc_unsync_cnt_for_multi_data();
+      TRANS_LOG(INFO, "unsync_cnt_for_multi_data inc", K(key_.tablet_id_), K(type), KPC(multi_source_data_unit));
+    } else if (MemtableRefOp::DEC_REF == ref_op) {
+      const_cast<T*>(multi_source_data_unit)->dec_unsync_cnt_for_multi_data();
+      TRANS_LOG(INFO, "unsync_cnt_for_multi_data dec", K(key_.tablet_id_), K(type), KPC(multi_source_data_unit));
+    }
+    if (MemtableRefOp::INC_REF == ref_op) {
       inc_unsubmitted_and_unsynced_cnt();
     }
     if (OB_FAIL(multi_source_data_.save_multi_source_data_unit(multi_source_data_unit, is_callback))) {
       TRANS_LOG(WARN, "fail to save to memtable", K(ret), KPC(multi_source_data_unit), K(type), KPC(this));
       if (MemtableRefOp::INC_REF == ref_op) {
+        const_cast<T*>(multi_source_data_unit)->dec_unsync_cnt_for_multi_data();
         dec_unsubmitted_and_unsynced_cnt();
+        TRANS_LOG(INFO, "unsync_cnt_for_multi_data dec for rollback", K(key_.tablet_id_), K(type), KPC(multi_source_data_unit));
+      } else if (MemtableRefOp::DEC_REF == ref_op) {
+        const_cast<T*>(multi_source_data_unit)->inc_unsync_cnt_for_multi_data();
+        TRANS_LOG(INFO, "unsync_cnt_for_multi_data inc for rollback", K(key_.tablet_id_), K(type), KPC(multi_source_data_unit));
       }
     } else {
-      if (MemtableRefOp::INC_REF == ref_op) {
-        TRANS_LOG(INFO, "unsync_cnt_for_multi_data inc", K(key_.tablet_id_), K(type));
-        if (OB_FAIL(multi_source_data_.update_unsync_cnt_for_multi_data(type, true))) {
-          TRANS_LOG(WARN, "fail to inc_cnt_for_multi_data", K(multi_source_data_unit), K(type), KPC(this));
-        }
-      }
       if (scn > get_start_scn() && scn < share::ObScnRange::MAX_SCN) {
         if (OB_FAIL(ret)) {
         }
@@ -618,12 +639,7 @@ int ObMemtable::save_multi_source_data_unit(const T *const multi_source_data_uni
       }
 
       if (MemtableRefOp::DEC_REF == ref_op) {
-        TRANS_LOG(INFO, "unsync_cnt_for_multi_data dec", K(key_.tablet_id_), K(type));
         dec_unsubmitted_and_unsynced_cnt();
-        if (OB_FAIL(ret)) {
-        } else if (OB_FAIL(multi_source_data_.update_unsync_cnt_for_multi_data(type, false))) {
-          TRANS_LOG(WARN, "fail to dec_cnt_for_multi_data", K(multi_source_data_unit), K(type), KPC(this));
-        }
       }
     }
     TRANS_LOG(INFO, "memtable save multi source data unit", K(ret), K(scn), K(ref_op),
@@ -689,6 +705,30 @@ public:
 private:
   uint32_t modify_count_;
   uint32_t acc_checksum_;
+};
+
+class MemtableMgrOpGuard
+{
+public:
+  explicit MemtableMgrOpGuard(ObMemtable *memtable): memtable_(memtable),
+                                                     memtable_mgr_(nullptr)
+  {
+    if (OB_NOT_NULL(memtable_)) {
+      memtable_->inc_memtable_mgr_op_cnt();
+      memtable_mgr_ = memtable_->get_memtable_mgr();
+    }
+  }
+  ~MemtableMgrOpGuard()
+  {
+    if (OB_NOT_NULL(memtable_)) {
+      memtable_->dec_memtable_mgr_op_cnt();
+      memtable_mgr_ = nullptr;
+    }
+  }
+  storage::ObTabletMemtableMgr *get_memtable_mgr() { return memtable_mgr_; }
+private:
+  ObMemtable *memtable_;
+  storage::ObTabletMemtableMgr *memtable_mgr_;
 };
 
 }

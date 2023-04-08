@@ -606,7 +606,7 @@ int ObAutoincrementService::clear_autoinc_cache_all(const uint64_t tenant_id,
       LOG_WARN("failed to create hash set", K(ret));
     //to do
     //fix can not get all server bug
-    // https://work.aone.alibaba-inc.com/issue/47360408
+    //
     } else if (OB_ISNULL(alive_server_list)) {
       if (OB_FAIL(get_server_set(tenant_id, table_id, server_set, true))) {
         SHARE_LOG(WARN, "failed to get table partitions server set", K(ret));
@@ -736,25 +736,44 @@ int ObAutoincrementService::get_table_node(const AutoincParam &param, TableNode 
       lib::ObMutex &mutex = init_node_mutex_[table_id % INIT_NODE_MUTEX_NUM];
       if (OB_FAIL(mutex.lock())) {
         LOG_WARN("failed to get lock", K(ret));
-      } else if (OB_ENTRY_NOT_EXIST == (ret = node_map_.get(key, table_node))) {
-        LOG_INFO("alloc table node for auto increment key", K(key));
-        if (OB_FAIL(node_map_.alloc_value(table_node))) {
-          LOG_ERROR("failed to alloc table node", K(param), K(ret));
-        } else if (OB_FAIL(table_node->init(param.autoinc_table_part_num_))) {
-          LOG_ERROR("failed to init table node", K(param), K(ret));
-        } else {
-          table_node->prefetch_node_.reset();
-          lib::ObMutexGuard guard(map_mutex_);
-          if (OB_FAIL(node_map_.insert_and_get(key, table_node))) {
-            LOG_WARN("failed to create table node", K(param), K(ret));
+      } else {
+        if (OB_ENTRY_NOT_EXIST == (ret = node_map_.get(key, table_node))) {
+          LOG_INFO("alloc table node for auto increment key", K(key));
+          if (OB_FAIL(node_map_.alloc_value(table_node))) {
+            LOG_ERROR("failed to alloc table node", K(param), K(ret));
+          } else if (OB_FAIL(table_node->init(param.autoinc_table_part_num_))) {
+            LOG_ERROR("failed to init table node", K(param), K(ret));
+          } else {
+            table_node->prefetch_node_.reset();
+            table_node->autoinc_version_ = param.autoinc_version_;
+            lib::ObMutexGuard guard(map_mutex_);
+            if (OB_FAIL(node_map_.insert_and_get(key, table_node))) {
+              LOG_WARN("failed to create table node", K(param), K(ret));
+            }
+          }
+          if (OB_FAIL(ret) && table_node != nullptr) {
+            node_map_.free_value(table_node);
+            table_node = NULL;
           }
         }
-        if (OB_FAIL(ret) && table_node != nullptr) {
-          node_map_.free_value(table_node);
-          table_node = NULL;
-        }
+        mutex.unlock();
       }
-      mutex.unlock();
+    }
+  } else {
+    if (OB_FAIL(alloc_autoinc_try_lock(table_node->alloc_mutex_))) {
+      LOG_WARN("failed to get lock", K(ret));
+    } else {
+      if (OB_UNLIKELY(param.autoinc_version_ != table_node->autoinc_version_)) {
+        LOG_INFO("start reset table node", K(*table_node), K(param));
+        table_node->next_value_ = 0;
+        table_node->local_sync_ = 0;
+        table_node->curr_node_.reset();
+        table_node->prefetch_node_.reset();
+        table_node->prefetching_ = false;
+        table_node->curr_node_state_is_pending_ = true;
+        table_node->autoinc_version_ = param.autoinc_version_;
+      }
+      table_node->alloc_mutex_.unlock();
     }
   }
   if (OB_SUCC(ret)) {
@@ -782,7 +801,7 @@ int ObAutoincrementService::get_schema(share::schema::ObSchemaGetterGuard &schem
    } else if (OB_FAIL(get_schema_func(tenant_id, schema_id, schema))) {
      LOG_WARN("get table schema failed", K(tenant_id), K(schema_id), K(ret));
    } else if (OB_ISNULL(schema)) {
-     // https://work.aone.alibaba-inc.com/issue/21709886
+     //
      // Why returns OB_ERR_WAIT_REMOTE_SCHEMA_REFRESH/OB_ERR_REMOTE_SCHEMA_NOT_FULL:
      //  1. since we can reach here, it means that this table can be seen in our executor
      //  2. schema is null imply schema can't be seen in this server. we may see it later. retry!
@@ -1418,7 +1437,7 @@ int ObAutoincrementService::calc_next_value(const uint64_t last_next_value,
 // https://dev.mysql.com/doc/refman/5.6/en/replication-options-master.html#sysvar_auto_increment_increment
 //
 // The doc does not mention one case: when offset > max_value, the formulator is not right.
-// a bug is recorded here: https://work.aone.alibaba-inc.com/issue/28626165
+// a bug is recorded here:
 int ObAutoincrementService::calc_prev_value(const uint64_t max_value,
                                             const uint64_t offset,
                                             const uint64_t increment,
@@ -1428,7 +1447,11 @@ int ObAutoincrementService::calc_prev_value(const uint64_t max_value,
   if (max_value <= offset) {
     prev_value = max_value;
   } else {
-    prev_value = ((max_value - offset) / increment) * increment + offset;
+    if (0 == increment) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      prev_value = ((max_value - offset) / increment) * increment + offset;
+    }
   }
   LOG_INFO("out of range for column. calc prev value",
            K(prev_value), K(max_value), K(offset), K(increment));

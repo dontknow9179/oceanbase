@@ -572,6 +572,8 @@ public:
 
   inline void set_session_id(const uint64_t id)  { session_id_ = id; }
   inline uint64_t get_session_id() const { return session_id_; }
+  inline void set_truncate_version(const int64_t truncate_version ) { truncate_version_ = truncate_version; }
+  inline int64_t get_truncate_version() const {return truncate_version_; }
   virtual int get_zone_list(
       share::schema::ObSchemaGetterGuard &schema_guard,
       common::ObIArray<common::ObZone> &zone_list) const override;
@@ -812,6 +814,7 @@ protected:
   uint64_t tablespace_id_;
   common::ObString encrypt_key_;
   uint64_t master_key_id_;
+  int64_t truncate_version_;
 
 
   // dblink.
@@ -1132,6 +1135,8 @@ public:
   inline bool has_generated_column() const { return generated_columns_.num_members() > 0; }
   // The table has a generated column that is a partition key.
   bool has_generated_and_partkey_column() const;
+  // Check whether the data table column has prefix index column deps.
+  int check_prefix_index_columns_depend(const ObColumnSchemaV2 &data_column_schema, ObSchemaGetterGuard &schema_guard, bool &has_prefix_idx_col_deps) const;
   int add_base_table_id(uint64_t base_table_id) { return base_table_ids_.push_back(base_table_id); }
   int add_depend_table_id(uint64_t depend_table_id) { return depend_table_ids_.push_back(depend_table_id); }
   int add_depend_mock_fk_parent_table_id(uint64_t depend_table_id) { return depend_mock_fk_parent_table_ids_.push_back(depend_table_id); }
@@ -1602,7 +1607,7 @@ inline bool ObSimpleTableSchemaV2::is_global_unique_index_table(const ObIndexTyp
 
 inline bool ObSimpleTableSchemaV2::is_local_unique_index_table() const
 {
-  // https://work.aone.alibaba-inc.com/issue/35726194
+  //
   return INDEX_TYPE_UNIQUE_LOCAL == index_type_
       || INDEX_TYPE_UNIQUE_GLOBAL_LOCAL_STORAGE == index_type_;
 }

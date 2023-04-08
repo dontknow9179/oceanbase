@@ -186,7 +186,7 @@ int ObJsonExprHelper::cast_to_json_tree(ObString &text, common::ObIAllocator *al
     LOG_WARN("get json tree fail", K(ret));
   } else {
     ObJsonBuffer jbuf(allocator);
-    if (OB_FAIL(j_tree->print(jbuf, true, false, 0, true))) {
+    if (OB_FAIL(j_tree->print(jbuf, true, false, 0))) {
       LOG_WARN("json binary to string failed", K(ret));
     } else if (jbuf.empty()) {
       ret = OB_ALLOCATE_MEMORY_FAILED;
@@ -647,7 +647,7 @@ int ObJsonExprHelper::transform_scalar_2jsonBase(const T &datum,
           ret = OB_ALLOCATE_MEMORY_FAILED;
           LOG_WARN("buf allocate failed", K(ret), K(type));
         } else {
-          json_node = (ObJsonDouble *)new(buf)ObJsonDouble(datum.get_double());
+          json_node = (ObJsonDouble *)new(buf)ObJsonDouble(val);
         }
       }
       break;
@@ -1162,7 +1162,7 @@ int ObJsonExprHelper::transform_convertible_2String(const ObExpr &expr,
         }
       } else {
         ObJsonString ob_str(value.ptr(), value.length());
-        if (OB_FAIL(ob_str.print(j_buf, true, false, 0, true))) {
+        if (OB_FAIL(ob_str.print(j_buf, true, false, 0))) {
           LOG_WARN("fail to print json node", K(ret));
         }
       }
@@ -1178,7 +1178,7 @@ int ObJsonExprHelper::transform_convertible_2String(const ObExpr &expr,
                                                    ObJsonInType::JSON_BIN, json_node))) {
         ret = OB_ERR_INVALID_JSON_TEXT_IN_PARAM;
         LOG_WARN("fail to get json base", K(ret));
-      } else if (OB_FAIL(json_node->print(j_buf, true, false, 0, true))) {
+      } else if (OB_FAIL(json_node->print(j_buf, true, false, 0))) {
         LOG_WARN("fail to print json node", K(ret));
       }
       break;
@@ -1562,9 +1562,6 @@ int ObJsonExprHelper::check_item_func_with_return(ObJsonPathNodeType path_type, 
       }
       break;
     }
-    case JPN_CEILING :{
-      break;
-    }
     case JPN_DATE :{
       if (dst_type == ObDateTimeType) {
       } else {
@@ -1581,14 +1578,13 @@ int ObJsonExprHelper::check_item_func_with_return(ObJsonPathNodeType path_type, 
       }
       break;
     }
-    case JPN_FLOOR :{
-      break;
-    }
+    case JPN_FLOOR :
+    case JPN_CEILING :
     case JPN_LENGTH :
     case JPN_NUMBER :
     case JPN_NUM_ONLY :
     case JPN_SIZE :{
-      if (JSON_EXPR_FLAG == 1 || (JSON_EXPR_FLAG ==0 && dst_type == ObNumberType)) {
+      if (JSON_EXPR_FLAG == 1 || (JSON_EXPR_FLAG == 0 && dst_type == ObNumberType)) {
       } else {
         ret = OB_ERR_INVALID_DATA_TYPE_RETURNING;
         LOG_WARN("item func is lower/upper, but return type is ", K(dst_type), K(ret));
@@ -1628,7 +1624,7 @@ int ObJsonExprHelper::check_item_func_with_return(ObJsonPathNodeType path_type, 
   return ret;
 }
 
-int ObJsonExprHelper::get_ascii_type(const ObExprResType param_type2, int64_t &dst_type)
+int ObJsonExprHelper::get_expr_option_value(const ObExprResType param_type2, int64_t &dst_type)
 {
   INIT_SUCC(ret);
   if (!param_type2.is_int() && !param_type2.get_param().is_int()) {
@@ -1699,6 +1695,70 @@ int ObJsonExprHelper::calc_asciistr_in_expr(const ObString &src,
         }
       }
     }
+  }
+  return ret;
+}
+
+int ObJsonExprHelper::parse_asc_option(ObExprResType& asc_type,
+                                       ObExprResType& type1,
+                                       ObExprResType& res_type,
+                                       ObExprTypeCtx& type_ctx)
+{
+  INIT_SUCC(ret);
+  ObExprResType temp_type;
+  ObObjType doc_type = type1.get_type();
+  int64_t asc_option = 0;
+
+  if (asc_type.get_type() != ObIntType) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("<ASCII type> param type is unexpected", K(asc_type.get_type()));
+  } else if (OB_FAIL(ObJsonExprHelper::get_expr_option_value(asc_type, asc_option))) {
+    LOG_WARN("get ascii type fail", K(ret));
+  } else if (asc_option == 1
+             && ob_is_string_type(doc_type)
+             && ((res_type.is_character_type() && (res_type.get_length_semantics() == LS_CHAR || res_type.get_length_semantics() == LS_BYTE))
+                  || res_type.is_lob())) {
+    type1.set_calc_length_semantics(res_type.get_length_semantics());
+    ObLength length = 0;
+    ObExprResType temp_type;
+    temp_type.set_meta(type1.get_calc_meta());
+    temp_type.set_length_semantics(res_type.get_length_semantics());
+    if (OB_FAIL(ObExprResultTypeUtil::deduce_max_string_length_oracle(type_ctx.get_session()->get_dtc_params(),
+                                                                      type1,
+                                                                      temp_type,
+                                                                      length))) {
+      LOG_WARN("fail to deduce max string length.", K(ret), K(temp_type), K(type1));
+    } else {
+      type1.set_calc_length(length);
+      res_type.set_length(length * 10);
+    }
+  }
+
+  return ret;
+}
+
+int ObJsonExprHelper::character2_ascii_string(common::ObIAllocator *allocator,
+                                              const ObExpr &expr,
+                                              ObEvalCtx &ctx,
+                                              ObString& result,
+                                              int32_t reserve_len)
+{
+  INIT_SUCC(ret);
+  char *buf = NULL;
+  int64_t buf_len = result.length() * ObCharset::MAX_MB_LEN * 2;
+  int32_t length = 0;
+
+  if ((OB_NOT_NULL(allocator) && OB_ISNULL(buf = static_cast<char*>(allocator->alloc(buf_len + reserve_len))))
+       || (OB_ISNULL(buf = static_cast<char*>(expr.get_str_res_mem(ctx, buf_len + reserve_len))))) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+    LOG_WARN("fail to allocate memory", K(ret), K(buf_len), K(result.length()));
+  } else if (OB_FAIL(ObJsonExprHelper::calc_asciistr_in_expr(result,
+                                                             expr.datum_meta_.cs_type_,
+                                                             expr.datum_meta_.cs_type_,
+                                                             buf, buf_len, length))) {
+    LOG_WARN("fail to calc unistr", K(ret));
+  } else {
+    result.assign_ptr(buf, length);
   }
   return ret;
 }

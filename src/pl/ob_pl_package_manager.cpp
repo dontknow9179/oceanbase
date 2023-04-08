@@ -214,7 +214,6 @@ static ObSysPackageFile mysql_sys_package_file_table[] = {
   {"dbms_application", "dbms_application_mysql.sql", "dbms_application_body_mysql.sql"},
   {"dbms_session", "dbms_session_mysql.sql", "dbms_session_body_mysql.sql"},
   {"dbms_monitor", "dbms_monitor_mysql.sql", "dbms_monitor_body_mysql.sql"},
-  {"dbms_xplan", "dbms_xplan_mysql.sql", "dbms_xplan_mysql_body.sql"},
   {"dbms_resource_manager", "dbms_resource_manager_mysql.sql", "dbms_resource_manager_body_mysql.sql"},
   {"dbms_udr", "dbms_udr_mysql.sql", "dbms_udr_body_mysql.sql"}
 };
@@ -758,15 +757,17 @@ int ObPLPackageManager::set_package_var_val(const ObPLResolveCtx &resolve_ctx,
     ret = OB_ERR_NUMERIC_OR_VALUE_ERROR;
     LOG_WARN("not null check violated", K(var->is_not_null()), K(var_val.is_null()), K(ret));
   }
-  OZ (package_state->set_package_var_val(var_idx, new_var_val));
+  OZ (package_state->set_package_var_val(var_idx, new_var_val, !need_deserialize));
+  if (OB_NOT_NULL(var) && var->get_type().is_cursor_type() && !var->get_type().is_cursor_var()) {
+    // package ref cursor variable, refrence outside, do not destruct it.
+  } else if (OB_FAIL(ret)) {
+    OZ (ObUserDefinedType::destruct_obj(new_var_val, &(resolve_ctx.session_info_)));
+  } else {
+    OZ (ObUserDefinedType::destruct_obj(old_var_val, &(resolve_ctx.session_info_)));
+  }
   if (!need_deserialize) {
     OZ (package_state->update_changed_vars(var_idx));
   }
-  OZ (var->get_type().free_session_var(resolve_ctx,
-                                       var->get_type().is_cursor_type() ?
-                                        package_state->get_pkg_cursor_allocator()
-                                        : package_state->get_pkg_allocator(),
-                                       old_var_val), K(package_id), K(var_idx), K(var_val));
   return ret;
 }
 
@@ -1194,7 +1195,7 @@ int ObPLPackageManager::get_package_item_state(const ObPLResolveCtx &resolve_ctx
       OZ (resolve_ctx.session_info_.add_package_state(package_id, package_state));
       if (OB_SUCC(ret)) {
         // TODO bin.lb: how about the memory?
-        // https://aone.alibaba-inc.com/project/81079/task/34962640
+        //
         OZ(package.get_frame_info().pre_alloc_exec_memory(exec_ctx));
       }
       if (OB_SUCC(ret)
@@ -1215,7 +1216,7 @@ int ObPLPackageManager::get_package_item_state(const ObPLResolveCtx &resolve_ctx
         }
       }
       if (package.get_expr_op_size() > 0) {
-        //Memory leak https://work.aone.alibaba-inc.com/issue/33582334
+        //Memory leak
         //Must be reset before free expr_op_ctx!
         exec_ctx.reset_expr_op();
         exec_ctx.get_allocator().free(exec_ctx.get_expr_op_ctx_store());

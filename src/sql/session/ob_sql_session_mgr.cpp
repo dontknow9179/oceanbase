@@ -433,8 +433,7 @@ int ObSQLSessionMgr::free_session(const ObFreeSessionCtx &ctx)
   ObSQLSessionInfo *sess_info = NULL;
   sessinfo_map_.get(Key(sessid), sess_info);
   if (NULL != sess_info) {
-    if (sess_info->has_got_conn_res()
-        && OB_UNLIKELY(OB_SUCCESS != sess_info->on_user_disconnect())) {
+    if (OB_UNLIKELY(OB_SUCCESS != sess_info->on_user_disconnect())) {
       LOG_WARN("user disconnect failed", K(ret), K(sess_info->get_user_id()));
     }
     sessinfo_map_.revert(sess_info);
@@ -578,6 +577,7 @@ int ObSQLSessionMgr::kill_session(ObSQLSessionInfo &session)
   }
 
   session.update_last_active_time();
+  session.set_disconnect_state(NORMAL_KILL_SESSION);
   rpc::ObSqlSockDesc &sock_desc = session.get_sock_desc();
   if (OB_LIKELY(NULL != sock_desc.sock_desc_)) {
     SQL_REQ_OP.disconnect_by_sql_sock_desc(sock_desc);
@@ -646,7 +646,7 @@ int ObSQLSessionMgr::mark_sessid_unused(uint32_t sess_id)
     // 由于server_id == 0时, 此时的local_seq，是由ATOMIC_FAA(&abnormal_seq, 1)产生，
     // 使用ATOMIC_FAA的原因无从考证（原作者的信息描述无任何具体信息），采取保守修改策略
     // local_seq未曾从sessid_sequence_队列中获取,所以不需要归还到队列，不然会导致队列溢出的bug
-    // bug详情:  https://work.aone.alibaba-inc.com/issue/30648631
+    // bug详情:
   } else if (OB_FAIL(sessid_sequence_.push(reinterpret_cast<void*>(sess_id & MAX_LOCAL_SEQ)))) {
     LOG_WARN("fail to push sessid to sessid_sequence_", K(sess_id), K(ret));
   }

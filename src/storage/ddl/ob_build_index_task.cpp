@@ -539,6 +539,7 @@ int ObUniqueIndexChecker::check_unique_index(ObIDag *dag)
   }
   if (is_inited_ && need_report_error_msg) {
     int tmp_ret = OB_SUCCESS;
+    int report_ret_code = OB_SUCCESS;
     const ObAddr &self_addr = GCTX.self_addr();
     bool keep_report_err_msg = true;
     LOG_INFO("begin to report build index status & ddl error message", K(index_schema_->get_table_id()), K(*index_schema_), K(tablet_id_));
@@ -552,12 +553,26 @@ int ObUniqueIndexChecker::check_unique_index(ObIDag *dag)
           LOG_INFO("get task id failed, but retry to get it", K(ret), K(tmp_ret), KPC(index_schema_));
         }
       } else if (OB_SUCCESS != (tmp_ret = ObDDLErrorMessageTableOperator::generate_index_ddl_error_message(
-          ret, *index_schema_, task_id, tablet_id_.id(), self_addr, *GCTX.sql_proxy_, "\0"))) {
+          ret, *index_schema_, task_id, tablet_id_.id(), self_addr, *GCTX.sql_proxy_, "\0", report_ret_code))) {
         LOG_WARN("fail to generate index ddl error message", K(ret), K(tmp_ret), KPC(index_schema_), K(tablet_id_), K(self_addr));
         ob_usleep(RETRY_INTERVAL);
         dag_yield();
       } else {
+        if (OB_ERR_PRIMARY_KEY_DUPLICATE == ret && OB_ERR_DUPLICATED_UNIQUE_KEY == report_ret_code) {
+          //error message of OB_ERR_PRIMARY_KEY_DUPLICATE is not compatiable with oracle, so use a new error code
+          ret = OB_ERR_DUPLICATED_UNIQUE_KEY;
+        }
         keep_report_err_msg = false;
+      }
+
+      if (OB_TMP_FAIL(tmp_ret) && keep_report_err_msg) {
+        bool is_tenant_dropped = false;
+        if (OB_TMP_FAIL(GSCHEMASERVICE.check_if_tenant_has_been_dropped(tenant_id_, is_tenant_dropped))) {
+          LOG_WARN("check if tenant has been dropped failed", K(tmp_ret), K(tenant_id_));
+        } else if (is_tenant_dropped) {
+          keep_report_err_msg = false;
+          LOG_INFO("break when tenant dropped", K(tmp_ret), KPC(index_schema_), K(tablet_id_), K(self_addr));
+        }
       }
     }
   }
@@ -786,6 +801,13 @@ int ObUniqueCheckingDag::fill_dag_key(char *buf, const int64_t buf_len) const
     STORAGE_LOG(WARN, "failed to fill dag key", K(ret), K(tablet_id_), K(index_id));
   }
   return ret;
+}
+
+bool ObUniqueCheckingDag::ignore_warning()
+{
+  return OB_EAGAIN == dag_ret_
+    || OB_NEED_RETRY == dag_ret_
+    || OB_TASK_EXPIRED == dag_ret_;
 }
 
 bool ObUniqueCheckingDag::operator==(const ObIDag &other) const

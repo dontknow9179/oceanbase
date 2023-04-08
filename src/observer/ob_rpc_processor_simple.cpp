@@ -1325,7 +1325,7 @@ int ObRpcCheckLSCanOfflineP::process()
     } else if (OB_ISNULL(gc_handler = ls->get_gc_handler())) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("gc_handler is null", K(ls_id));
-    } else if (OB_FAIL(gc_handler->check_ls_can_offline())) {
+    } else if (OB_FAIL(gc_handler->check_ls_can_offline(arg_.get_ls_status()))) {
       LOG_WARN("check_ls_can_offline failed", K(ls_id), K(ret));
     } else {
       LOG_INFO("check_ls_can_offline success", K(ls_id));
@@ -2203,6 +2203,18 @@ int ObRpcGetLSSyncScnP::process()
   } else if (OB_FAIL(gctx_.ob_service_->get_ls_sync_scn(arg_, result_))) {
     COMMON_LOG(WARN, "failed to get_ls_sync_scn", KR(ret), K(arg_));
   }
+  return ret;
+}
+
+int ObForceSetLSAsSingleReplicaP::process()
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(gctx_.ob_service_)) {
+    ret = OB_ERR_UNEXPECTED;
+    COMMON_LOG(WARN, "ob_service is null", KR(ret));
+  } else if (OB_FAIL(gctx_.ob_service_->force_set_ls_as_single_replica(arg_))) {
+    COMMON_LOG(WARN, "force_set_ls_as_single_replica failed", KR(ret), K(arg_));
+  } else {}
   return ret;
 }
 

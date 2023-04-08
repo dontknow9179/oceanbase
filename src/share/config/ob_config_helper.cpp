@@ -345,8 +345,7 @@ bool ObConfigMemoryLimitChecker::check(const ObConfigItem &t) const
   bool is_valid = false;
   int64_t value = ObConfigCapacityParser::get(t.str(), is_valid);
   if (is_valid) {
-    is_valid = 0 == value || (value >= lib::ObRunningModeConfig::instance().MINI_MEM_LOWER
-                              && value < get_phy_mem_size());
+    is_valid = 0 == value || value >= lib::ObRunningModeConfig::instance().MINI_MEM_LOWER;
   }
   return is_valid;
 }
@@ -511,7 +510,7 @@ int64_t ObConfigReadableIntParser::get(const char *str, bool &valid)
     } else if (value < 0) {
       valid = false;
     } else if ('\0' == *p_unit) {
-      // https://aone.alibaba-inc.com/req/23558382
+      //
       // without any unit, do nothing
     } else if (0 == STRCASECMP("k", p_unit)) {
       value *= UNIT_K;

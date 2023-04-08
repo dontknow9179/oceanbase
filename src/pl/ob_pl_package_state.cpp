@@ -183,7 +183,7 @@ void ObPLPackageState::reset(ObSQLSessionInfo *session_info)
   cursor_allocator_.reset();
 }
 
-int ObPLPackageState::set_package_var_val(const int64_t var_idx, const ObObj &value)
+int ObPLPackageState::set_package_var_val(const int64_t var_idx, const ObObj &value, bool deep_copy_complex)
 {
   int ret = OB_SUCCESS;
   if (var_idx < 0 || var_idx >= vars_.count()) {
@@ -199,7 +199,10 @@ int ObPLPackageState::set_package_var_val(const int64_t var_idx, const ObObj &va
         LOG_WARN("failed to alloc memory for pacakge var", K(ret), K(buf));
       }
       OZ (vars_.at(var_idx).deep_copy(value, buf, value.get_deep_copy_size(), pos));
-    } else if (value.is_pl_extend()) {
+    } else if (value.is_pl_extend()
+               && value.get_meta().get_extend_type() != PL_CURSOR_TYPE
+               && value.get_meta().get_extend_type() != PL_REF_CURSOR_TYPE
+               && deep_copy_complex) {
       ObObj copy;
       OZ (ObUserDefinedType::deep_copy_obj(inner_allocator_, value, copy));
       OX (vars_.at(var_idx) = copy);
@@ -330,7 +333,8 @@ int ObPLPackageState::convert_changed_info_to_string_kvs(ObPLExecCtx &pl_ctx, Ob
   OZ (pl_ctx.exec_ctx_->get_sql_ctx()->schema_guard_->get_package_info(tenant_id, package_id_, package_info));
   if (OB_NOT_NULL(package_info)) {
     for (int64_t i = 0; i < vars_.count() && OB_SUCCESS == ret; ++i) {
-      if (changed_vars_.has_member(i)) {
+      if (changed_vars_.has_member(i)
+          && vars_.at(i).get_meta().get_extend_type() != PL_REF_CURSOR_TYPE) {
         key_str.reset();
         value_obj.reset();
         if (OB_FAIL(convert_info_to_string_kv(pl_ctx, i, VARIABLE, key_str, value_obj))) {

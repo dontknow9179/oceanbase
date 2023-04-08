@@ -282,35 +282,35 @@ public:
     : ref_action_(share::schema::ACTION_INVALID),
       database_name_(),
       table_name_(),
-      table_id_(0),
       columns_(),
-      is_self_ref_(false)
+      is_self_ref_(false),
+      table_id_(OB_INVALID_ID)
   {}
 
   ObForeignKeyArg(common::ObIAllocator &alloc)
     : ref_action_(share::schema::ACTION_INVALID),
       database_name_(),
       table_name_(),
-      table_id_(0),
       columns_(alloc),
-      is_self_ref_(false)
+      is_self_ref_(false),
+      table_id_(OB_INVALID_ID)
   {}
   inline void reset()
   {
     ref_action_ = share::schema::ACTION_INVALID;
     database_name_.reset();
     table_name_.reset();
-    table_id_ = 0;
+    table_id_ = OB_INVALID_ID;
     columns_.reset();
   }
-  TO_STRING_KV(K_(ref_action), K_(database_name), K_(table_name), K_(columns), K_(is_self_ref));
+  TO_STRING_KV(K_(ref_action), K_(database_name), K_(table_name), K_(columns), K_(is_self_ref), K_(table_id));
 public:
   share::schema::ObReferenceAction ref_action_;
   common::ObString database_name_;
   common::ObString table_name_;
-  uint64_t table_id_;
   common::ObFixedArray<ObForeignKeyColumn, common::ObIAllocator> columns_;
   bool is_self_ref_;
+  uint64_t table_id_;
 };
 typedef common::ObFixedArray<ObForeignKeyArg, common::ObIAllocator> ObForeignKeyArgArray;
 
@@ -369,7 +369,7 @@ struct SeRowkeyItem
   ObDatum *datums_;
   int64_t cnt_;
 };
-typedef common::hash::ObHashSet<SeRowkeyItem, common::hash::NoPthreadDefendMode> SeRowkeyDistCtx;
+typedef common::hash::ObHashSet<ObRowkey, common::hash::NoPthreadDefendMode> SeRowkeyDistCtx;
 
 //dml base compile info definition
 struct ObDMLBaseCtDef
@@ -606,7 +606,8 @@ public:
       found_rows_(0),
       related_upd_rtdefs_(),
       related_del_rtdefs_(),
-      related_ins_rtdefs_()
+      related_ins_rtdefs_(),
+      table_rowkey_()
   { }
   virtual ~ObUpdRtDef()
   {
@@ -626,6 +627,7 @@ public:
       dlock_rtdef_->~ObDASLockRtDef();
       dlock_rtdef_ = nullptr;
     }
+    table_rowkey_.reset();
   }
   INHERIT_TO_STRING_KV("base_rtdef", ObDMLBaseRtDef,
                        K_(dupd_rtdef),
@@ -648,6 +650,7 @@ public:
   DASUpdRtDefArray related_upd_rtdefs_;
   DASDelRtDefArray related_del_rtdefs_;
   DASInsRtDefArray related_ins_rtdefs_;
+  ObRowkey table_rowkey_;
 };
 
 struct ObMultiLockCtDef
@@ -756,7 +759,8 @@ public:
     : ObDMLBaseRtDef(das_rtdef_),
       das_rtdef_(),
       related_rtdefs_(),
-      se_rowkey_dist_ctx_(nullptr)
+      se_rowkey_dist_ctx_(nullptr),
+      table_rowkey_()
   { }
   virtual ~ObDelRtDef()
   {
@@ -764,6 +768,7 @@ public:
       // se_rowkey_dist_ctx_->destroy();
       se_rowkey_dist_ctx_ = nullptr;
     }
+    table_rowkey_.reset();
   }
   INHERIT_TO_STRING_KV("base_rtdef", ObDMLBaseRtDef,
                        K_(das_rtdef),
@@ -771,6 +776,7 @@ public:
   ObDASDelRtDef das_rtdef_;
   DASDelRtDefArray related_rtdefs_;
   SeRowkeyDistCtx *se_rowkey_dist_ctx_;
+  ObRowkey table_rowkey_;
 };
 struct ObMergeCtDef
 {
@@ -800,7 +806,8 @@ public:
     : ins_rtdef_(),
       upd_rtdef_(),
       del_rtdef_(),
-      rowkey_dist_ctx_(NULL)
+      rowkey_dist_ctx_(NULL),
+      table_rowkey_()
   { }
 
   ~ObMergeRtDef()
@@ -812,6 +819,7 @@ public:
       rowkey_dist_ctx_->destroy();
       rowkey_dist_ctx_ = nullptr;
     }
+    table_rowkey_.reset();
   }
 
   TO_STRING_KV(K_(ins_rtdef),
@@ -822,6 +830,7 @@ public:
   ObUpdRtDef upd_rtdef_;
   ObDelRtDef del_rtdef_;
   SeRowkeyDistCtx *rowkey_dist_ctx_;
+  ObRowkey table_rowkey_;
 };
 
 struct ObReplaceCtDef
@@ -919,12 +928,14 @@ struct ObDMLRtCtx
   ObDMLRtCtx(ObEvalCtx &eval_ctx, ObExecContext &exec_ctx, ObTableModifyOp &op)
     : das_ref_(eval_ctx, exec_ctx),
       das_task_status_(),
-      op_(op)
+      op_(op),
+      cached_row_size_(0)
   { }
 
   void reuse()
   {
     das_ref_.reuse();
+    cached_row_size_ = 0;
   }
 
   void cleanup()
@@ -941,10 +952,13 @@ struct ObDMLRtCtx
   { return das_task_status_.need_pick_del_task_first(); }
   bool need_non_sub_full_task()
   { return das_task_status_.need_non_sub_full_task(); }
+  void add_cached_row_size(const int64_t row_size) { cached_row_size_ += row_size; }
+  int64_t get_cached_row_size() const { return cached_row_size_; }
 
   ObDASRef das_ref_;
   DasTaskStatus das_task_status_;
   ObTableModifyOp &op_;
+  int64_t cached_row_size_;
 };
 
 template <typename T>

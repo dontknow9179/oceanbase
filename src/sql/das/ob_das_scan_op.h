@@ -217,6 +217,7 @@ public:
   ObDASScanResult();
   virtual ~ObDASScanResult();
   virtual int init(const ObIDASTaskOp &op, common::ObIAllocator &alloc) override;
+  virtual int reuse() override;
   virtual int get_next_row(ObNewRow *&row) override;
   virtual int get_next_row() override;
   virtual int get_next_rows(int64_t &count, int64_t capacity) override;
@@ -328,7 +329,7 @@ public:
   void set_rowkey_iter(common::ObNewRowIterator *rowkey_iter) {rowkey_iter_ = rowkey_iter;}
   common::ObNewRowIterator *get_rowkey_iter() { return rowkey_iter_; }
   int reuse_iter();
-  virtual int reset_lookup_state(bool need_switch_param);
+  virtual int reset_lookup_state();
   int revert_iter();
   VIRTUAL_TO_STRING_KV(KPC_(lookup_ctdef),
                        KPC_(lookup_rtdef),

@@ -49,8 +49,8 @@ const ObIOConfig &ObIOConfig::default_config()
 void ObIOConfig::set_default_value()
 {
   write_failure_detect_interval_ = 60 * 1000 * 1000; // 1 min
-  read_failure_black_list_interval_ = 300 * 1000 * 1000; // 5 min
-  data_storage_warning_tolerance_time_ = 30L * 1000L * 1000L; // 30s
+  read_failure_black_list_interval_ = 60 * 1000 * 1000; // Cooperate with the adjustment of tolerance_time to 1min
+  data_storage_warning_tolerance_time_ = 5L * 1000L * 1000L; // 5s, same as parameter seed
   data_storage_error_tolerance_time_ = 300L * 1000L * 1000L; // 300s
   disk_io_thread_count_ = 8;
   data_storage_io_timeout_ms_ = 120L * 1000L; // 120s
@@ -859,7 +859,7 @@ int ObIOSender::init(const int64_t sender_index)
     is_inited_ = true;
     sender_req_count_ = 0;
     sender_index_ = sender_index;
-    LOG_INFO("io sender init succ", KCSTRING(lbt()));
+    LOG_INFO("io sender init succ", KCSTRING(lbt()), K(sender_index));
   }
 
   if (OB_UNLIKELY(!is_inited_)) {
@@ -888,14 +888,14 @@ void ObIOSender::stop()
   stop_submit();
   if (tg_id_ >= 0) {
     TG_STOP(tg_id_);
-  }  
+  }
 }
 
 void ObIOSender::wait()
 {
   if (tg_id_ >= 0) {
     TG_WAIT(tg_id_);
-  }  
+  }
 }
 
 void ObIOSender::destroy()
@@ -985,6 +985,7 @@ int ObIOSender::enqueue_request(ObIORequest &req)
     if (OB_FAIL(cond_guard.get_ret())) {
       LOG_ERROR("guard queue condition failed", K(ret));
     } else {
+      req.sender_index_ = sender_index_;
       ObIOGroupQueues *io_group_queues = nullptr;
       if (OB_FAIL(tenant_groups_map_.get_refactored(tmp_req->io_info_.tenant_id_, io_group_queues))) {
         LOG_WARN("get_refactored tenant_map failed", K(ret), K(req));
@@ -1013,7 +1014,7 @@ int ObIOSender::enqueue_request(ObIORequest &req)
       }
       if (OB_SUCC(ret)) {
         if (tmp_phy_queue->req_list_.is_empty()) {
-          //new request        
+          //new request
           if (OB_FAIL(io_queue_->remove_from_heap(tmp_phy_queue))) {
             LOG_WARN("remove phy queue from heap failed", K(ret), K(index));
           } else {
@@ -1025,7 +1026,7 @@ int ObIOSender::enqueue_request(ObIORequest &req)
               LOG_WARN("push new req into phy queue failed", K(ret));
             } else {
               ATOMIC_INC(&sender_req_count_);
-              req.time_log_.enqueue_ts_ = ObTimeUtility::fast_current_time();      
+              req.time_log_.enqueue_ts_ = ObTimeUtility::fast_current_time();
               //calc ts_
               if (OB_NOT_NULL(req.tenant_io_mgr_.get_ptr())) {
                 ObTenantIOClock *io_clock = static_cast<ObTenantIOClock *>(req.tenant_io_mgr_.get_ptr()->get_io_clock());
@@ -1253,7 +1254,7 @@ int ObIOSender::notify()
 
 int64_t ObIOSender::get_queue_count() const
 {
-  return OB_ISNULL(io_queue_) ?  0 : sender_req_count_;
+  return OB_ISNULL(io_queue_) ?  0 : ATOMIC_LOAD(&sender_req_count_);
 }
 
 int ObIOSender::get_sender_info(int64_t &reservation_ts,
@@ -1337,6 +1338,7 @@ void ObIOSender::pop_and_submit()
     } else {
       if (OB_FAIL(submit(*req))) {
         if (OB_EAGAIN == ret) {
+          LOG_INFO("IOChannel submit failed, re_submit req", K(ret), K(*req));
           req->dec_ref("phyqueue_dec"); // ref for io queue
           ObIORequest &re_req = *req;
           if (OB_FAIL(enqueue_request(re_req))) {
@@ -1381,11 +1383,13 @@ int ObIOSender::submit(ObIORequest &req)
 {
   int ret = OB_SUCCESS;
   ObDeviceChannel *device_channel = nullptr;
+  ObTimeGuard time_guard("submit_req", 100000); //100ms
   if (OB_UNLIKELY(stop_submit_)) {
     ret = OB_STATE_NOT_MATCH;
     LOG_WARN("sender stop submit", K(ret), K(stop_submit_));
   } else if (OB_FAIL(req.prepare())) {
     LOG_WARN("prepare io request failed", K(ret), K(req));
+  } else if (FALSE_IT(time_guard.click("prepare_req"))) {
   } else if (OB_FAIL(OB_IO_MANAGER.get_device_channel(req.io_info_.fd_.device_handle_, device_channel))) {
     LOG_WARN("get device channel failed", K(ret), K(req));
   } else {
@@ -1399,7 +1403,13 @@ int ObIOSender::submit(ObIORequest &req)
       if (OB_EAGAIN != ret) {
         LOG_WARN("submit io request failed", K(ret), K(req), KPC(device_channel));
       }
+    } else {
+      time_guard.click("device_submit");
     }
+  }
+  if (time_guard.get_diff() > 100000) {// 100ms
+    //print req
+    LOG_INFO("submit_request cost too much time", K(ret), K(time_guard), K(req));
   }
   return ret;
 }
@@ -1470,7 +1480,7 @@ void ObIOScheduler::destroy()
   }
   for (int64_t i = 0; i < senders_.count(); ++i) {
     senders_.at(i)->wait();
-  }  
+  }
   for (int64_t i = 0; i < senders_.count(); ++i) {
     ObIOSender *&tmp_sender = senders_.at(i);
     if (OB_NOT_NULL(tmp_sender)) {
@@ -1507,7 +1517,7 @@ void ObIOScheduler::stop()
   }
 }
 
-int ObIOScheduler::schedule_request(ObTenantIOClock &io_clock, ObIORequest &req)
+int ObIOScheduler::schedule_request(ObIORequest &req)
 {
   int ret = OB_SUCCESS;
   RequestHolder holder(&req);
@@ -1518,7 +1528,9 @@ int ObIOScheduler::schedule_request(ObTenantIOClock &io_clock, ObIORequest &req)
     // push the requeust into sender queue, balance channel queue count by random twice
     const int64_t idx1 = ObRandom::rand(0, senders_.count() - 1);
     const int64_t idx2 = ObRandom::rand(0, senders_.count() - 1);
-    const int64_t sender_idx = senders_.at(idx1)->sender_req_count_ < senders_.at(idx2)->sender_req_count_ ? idx1 : idx2;
+    const int64_t count1 = senders_.at(idx1)->get_queue_count();
+    const int64_t count2 = senders_.at(idx2)->get_queue_count();
+    const int64_t sender_idx = count1 < count2 ? idx1 : idx2;
     ObIOSender *sender = senders_.at(sender_idx);
     if (req.io_info_.fd_.device_handle_->media_id_ != schedule_media_id_) {
       // direct submit
@@ -1737,14 +1749,14 @@ void ObAsyncIOChannel::stop()
 {
   if (tg_id_ >= 0) {
     TG_STOP(tg_id_);
-  }  
+  }
 }
 
 void ObAsyncIOChannel::wait()
 {
   if (tg_id_ >= 0) {
     TG_WAIT(tg_id_);
-  }  
+  }
 }
 
 void ObAsyncIOChannel::destroy()
@@ -1813,7 +1825,7 @@ int ObAsyncIOChannel::submit(ObIORequest &req)
     }
   } else if (device_channel_->used_io_depth_ > device_channel_->max_io_depth_) {
     ret = OB_EAGAIN;
-    LOG_DEBUG("reach max io depth", K(ret), K(device_channel_->used_io_depth_), K(device_channel_->max_io_depth_));
+    LOG_INFO("reach max io depth", K(ret), K(device_channel_->used_io_depth_), K(device_channel_->max_io_depth_));
   } else {
     ATOMIC_INC(&submit_count_);
     ATOMIC_FAA(&device_channel_->used_io_depth_, get_io_depth(req.io_size_));
@@ -1908,8 +1920,7 @@ void ObAsyncIOChannel::get_events()
           }
         } else { // io failed
           LOG_ERROR("io request failed", K(*req), K(system_errno), K(complete_size));
-          const bool need_retry = false; // wait io device to support retry policy
-          if (need_retry) {
+          if (-EAGAIN == system_errno) { //retry
             if (OB_FAIL(on_full_retry(*req))) {
               LOG_WARN("retry io request failed", K(ret), K(system_errno), K(*req));
             }
@@ -2375,7 +2386,7 @@ void ObIORunner::stop()
 {
   if (tg_id_ >= 0) {
     TG_STOP(tg_id_);
-  } 
+  }
 }
 
 void ObIORunner::wait()
@@ -2504,7 +2515,7 @@ int ObIORunner::handle(ObIORequest *req)
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("io request can not do callback", K(ret), K(*req));
       } else if (OB_FAIL(req->copied_callback_->process(OB_SUCCESS == req->ret_code_.io_ret_))) {
-        LOG_WARN("fail to callback", K(ret), K(*req));
+        LOG_WARN("fail to callback", K(ret), K(*req), K(MTL_ID()));
       }
       req->time_log_.callback_finish_ts_ = ObTimeUtility::fast_current_time();
     }
@@ -2787,6 +2798,7 @@ void ObIOFaultDetector::handle(void *task)
     const int64_t LONG_AIO_TIMEOUT_MS = 30000; // 30s
     RetryTask *retry_task = reinterpret_cast<RetryTask *>(task);
     retry_task->io_info_.flag_.set_unlimited();
+    retry_task->io_info_.flag_.set_detect();
     int64_t timeout_ms = retry_task->timeout_ms_;
     // remain 1s to avoid race condition for retry_black_list_interval
     const int64_t retry_black_list_interval_ms = io_config_.read_failure_black_list_interval_ / 1000L - 1000L;
@@ -2806,10 +2818,15 @@ void ObIOFaultDetector::handle(void *task)
       timeout_ms = min(left_timeout_ms, min(MAX_IO_RETRY_TIMEOUT_MS, max(timeout_ms * 2, MIN_IO_RETRY_TIMEOUT_MS)));
       if (timeout_ms > 0) {
         // do retry io
-        if (OB_FAIL(OB_IO_MANAGER.read(retry_task->io_info_, handle, timeout_ms))) {
+        if (OB_FAIL(OB_IO_MANAGER.detect_read(retry_task->io_info_, handle, timeout_ms))) {
           if (OB_TIMEOUT == ret) {
             LOG_WARN("ObIOManager::read failed", K(ret), K(retry_task->io_info_), K(timeout_ms));
             ret = OB_SUCCESS;
+          } else if (OB_EAGAIN == ret) { //maybe channel is busy, wait and retry
+            ob_usleep(100 * 1000); // 100ms
+            ret = OB_SUCCESS;
+          } else {
+            LOG_WARN("ObIOManager::retry read request failed", K(ret), K(retry_task->io_info_));
           }
         } else {
           is_retry_succ = true;
@@ -2873,6 +2890,8 @@ void ObIOFaultDetector::record_failure(const ObIORequest &req)
   if (OB_UNLIKELY(!is_inited_)) {
     ret = OB_NOT_INIT;
     LOG_WARN("io fault detector not init", K(ret), KP(is_inited_));
+  } else if (req.get_flag().is_detect()) {
+    //ignore, do not retry
   } else if (req.is_finished_ && OB_IO_ERROR != req.ret_code_.io_ret_) {
     // ignore, do nothing here
   } else if (req.get_flag().is_read()) {

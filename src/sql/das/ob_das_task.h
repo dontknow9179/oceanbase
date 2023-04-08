@@ -183,8 +183,6 @@ public:
   void set_can_part_retry(const bool flag) { can_part_retry_ = flag; }
   bool can_part_retry() const { return can_part_retry_; }
   bool is_in_retry() const { return in_part_retry_ || in_stmt_retry_; }
-  void set_need_switch_param(bool v) { need_switch_param_ = v; }
-  bool need_switch_param() const { return need_switch_param_; }
   void set_task_status(ObDasTaskStatus status);
   ObDasTaskStatus get_task_status() const { return task_status_; };
   const ObDasAggregatedTasks *get_agg_tasks() const { return agg_tasks_; };
@@ -199,8 +197,9 @@ public:
   int state_advance();
   void set_cur_agg_list(DasTaskLinkedList *list) { cur_agg_list_ = list; };
   DasTaskLinkedList *get_cur_agg_list() { return cur_agg_list_; };
-  void set_remote_op_result(ObIDASTaskResult *op_result) { op_result_ = op_result; };
 
+  ObIDASTaskResult *get_op_result() const { return op_result_; }
+  void set_op_result(ObIDASTaskResult *op_result) { op_result_ = op_result; }
 protected:
   int start_das_task();
   int end_das_task();
@@ -222,7 +221,7 @@ protected:
       uint16_t task_started_     : 1;
       uint16_t in_part_retry_    : 1;
       uint16_t in_stmt_retry_    : 1;
-      uint16_t need_switch_param_ : 1; //need to switch param in gi table rescan
+      uint16_t need_switch_param_ : 1; //need to switch param in gi table rescan, this parameter has been deprecated
       uint16_t status_reserved_  : 12;
     };
   };
@@ -241,7 +240,7 @@ protected:
   DasTaskNode das_task_node_;  // tasks's linked list node, do not serialize
   ObDasAggregatedTasks *agg_tasks_;  // task's agg task, do not serialize
   DasTaskLinkedList *cur_agg_list_;  // task's agg_list, do not serialize
-  ObIDASTaskResult* op_result_;  // as async result, do not serialize
+  ObIDASTaskResult *op_result_;
 
 public:
   const static uint32_t DAS_ROW_EXTEND_SIZE = 16;
@@ -256,6 +255,7 @@ public:
   ObIDASTaskResult() : task_id_(0) { }
   virtual ~ObIDASTaskResult() { }
   virtual int init(const ObIDASTaskOp &task_op, common::ObIAllocator &alloc) = 0;
+  virtual int reuse() = 0;
   virtual int link_extra_result(ObDASExtraData &extra_result)
   {
     UNUSED(extra_result);

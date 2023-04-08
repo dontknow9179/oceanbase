@@ -72,7 +72,8 @@ ObTableAccessContext::ObTableAccessContext()
     lob_locator_helper_(nullptr),
     iter_pool_(nullptr),
     block_row_store_(nullptr),
-    io_callback_(nullptr)
+    io_callback_(nullptr),
+    trans_state_mgr_(nullptr)
 {
   merge_scn_.set_max();
 }
@@ -243,8 +244,9 @@ int ObTableAccessContext::init(const common::ObQueryFlag &query_flag,
     // 4. only init lob locator helper when nessary?
     if (OB_FAIL(build_lob_locator_helper(ctx, trans_version_range))) {
       STORAGE_LOG(WARN, "Failed to build lob locator helper", K(ret));
+    } else {
+      is_inited_ = true;
     }
-    is_inited_ = true;
   }
   return ret;
 }

@@ -5941,6 +5941,21 @@ int ObInnerTableSchema::all_virtual_core_all_table_ora_schema(ObTableSchema &tab
       false, //is_nullable
       false); //is_autoincrement
   }
+
+  if (OB_SUCC(ret)) {
+    ADD_COLUMN_SCHEMA("TRUNCATE_VERSION", //column_name
+      ++column_id, //column_id
+      0, //rowkey_id
+      0, //index_id
+      0, //part_key_pos
+      ObNumberType, //column_type
+      CS_TYPE_INVALID, //column_collation_type
+      38, //column_length
+      38, //column_precision
+      0, //column_scale
+      false, //is_nullable
+      false); //is_autoincrement
+  }
   table_schema.set_index_using_type(USING_HASH);
   table_schema.set_row_store_type(ENCODING_ROW_STORE);
   table_schema.set_store_format(OB_STORE_FORMAT_DYNAMIC_MYSQL);
@@ -8297,6 +8312,21 @@ int ObInnerTableSchema::all_virtual_proxy_partition_info_ora_schema(ObTableSchem
       CS_TYPE_UTF8MB4_BIN, //column_collation_type
       OB_MAX_PARTITION_EXPR_LENGTH, //column_length
       2, //column_precision
+      -1, //column_scale
+      false, //is_nullable
+      false); //is_autoincrement
+  }
+
+  if (OB_SUCC(ret)) {
+    ADD_COLUMN_SCHEMA("PART_KEY_DEFAULT_VALUE", //column_name
+      ++column_id, //column_id
+      0, //rowkey_id
+      0, //index_id
+      0, //part_key_pos
+      ObLongTextType, //column_type
+      CS_TYPE_INVALID, //column_collation_type
+      0, //column_length
+      -1, //column_precision
       -1, //column_scale
       false, //is_nullable
       false); //is_autoincrement
@@ -11670,6 +11700,21 @@ int ObInnerTableSchema::all_virtual_backup_set_files_ora_schema(ObTableSchema &t
 
   if (OB_SUCC(ret)) {
     ADD_COLUMN_SCHEMA("PATH", //column_name
+      ++column_id, //column_id
+      0, //rowkey_id
+      0, //index_id
+      0, //part_key_pos
+      ObVarcharType, //column_type
+      CS_TYPE_UTF8MB4_BIN, //column_collation_type
+      OB_INNER_TABLE_DEFAULT_VALUE_LENTH, //column_length
+      2, //column_precision
+      -1, //column_scale
+      true, //is_nullable
+      false); //is_autoincrement
+  }
+
+  if (OB_SUCC(ret)) {
+    ADD_COLUMN_SCHEMA("CLUSTER_VERSION", //column_name
       ++column_id, //column_id
       0, //rowkey_id
       0, //index_id

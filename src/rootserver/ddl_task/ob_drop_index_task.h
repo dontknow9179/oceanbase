@@ -32,12 +32,13 @@ public:
       const uint64_t index_table_id,
       const int64_t schema_version,
       const int64_t parent_task_id,
+      const int64_t consumer_group_id,
       const obrpc::ObDropIndexArg &drop_index_arg);
   int init(const ObDDLTaskRecord &task_record);
   virtual int process() override;
   virtual bool is_valid() const override;
   virtual int serialize_params_to_message(char *buf, const int64_t buf_size, int64_t &pos) const override;
-  virtual int deserlize_params_from_message(const char *buf, const int64_t buf_size, int64_t &pos) override;
+  virtual int deserlize_params_from_message(const uint64_t tenant_id, const char *buf, const int64_t buf_size, int64_t &pos) override;
   virtual int64_t get_serialize_param_size() const override;
   INHERIT_TO_STRING_KV("ObDDLTask", ObDDLTask, KP_(root_service));
   virtual void flt_set_task_span_tag() const override;
